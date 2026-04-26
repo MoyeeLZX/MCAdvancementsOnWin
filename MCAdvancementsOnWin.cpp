@@ -1071,7 +1071,7 @@ bool DownloadAdvancementJson(HWND hWnd) {
         // 打开URL（修改后的地址）
         UpdateDownloadProgress(30, L"正在连接到服务器...");
         hUrl = InternetOpenUrl(hInternet,
-            L"https://png.2btb.top/repo/mc_adv_on_win/adv.json",
+            L"https://raw.githubusercontent.com/MoyeeLZX/MCAdvancementsOnWin/refs/heads/main/repo/adv.json",
             NULL, 0, INTERNET_FLAG_RELOAD, 0);
 
         if (!hUrl) {
