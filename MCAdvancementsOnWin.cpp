@@ -1645,7 +1645,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_COMMAND: {
         int wmId = LOWORD(wParam);
         if (wmId == IDM_HELP_ABOUT) {
-            MessageBox(hWnd, L"MC Advancements on Windows \nversion : beta-2026.4.20 \n检测Windows操作并解锁成就！",
+            MessageBox(hWnd, L"MC Advancements on Windows \nversion : beta-2026.4.26 \n检测Windows操作并解锁成就！",
                 L"关于", MB_OK);
         }
         else if (wmId == IDM_FILE_EXIT) {
