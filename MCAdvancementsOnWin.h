@@ -39,6 +39,7 @@ struct Advancement {
 struct NotificationData {
     Advancement* pAdv;
     Gdiplus::Bitmap* pBitmap;
+    std::wstring* pFontPath;  // 字体文件路径（可选）
 };
 
 // 设置管理器

@@ -14,6 +14,7 @@
 #include <iomanip>
 #include <queue>
 #include <mutex>
+#include <fstream>
 #pragma comment(lib, "gdiplus.lib")
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "msimg32.lib")
@@ -30,6 +31,7 @@ WCHAR szWindowClass[100] = L"MCAdvancementsOnWin";
 AdvancementManager* g_pAdvManager = nullptr;
 ULONG_PTR g_gdiplusToken = 0;
 SettingsManager* g_pSettingsManager = nullptr;
+HWND g_hMainWnd = nullptr;  // 全局主窗口句柄
 
 // 下载进度窗口相关
 HWND g_hDownloadWnd = nullptr;
@@ -123,31 +125,62 @@ bool PlayAudioFile(const std::wstring& filePath) {
 
 // 新增：添加成就到队列
 void AddAchievementToQueue(const Advancement& adv) {
+    OutputDebugString(L"AddAchievementToQueue called\n");
+
     std::lock_guard<std::mutex> lock(g_queueMutex);
     g_achievementQueue.push(adv);
 
+    wchar_t debugMsg[256];
+    swprintf_s(debugMsg, L"成就已添加到队列: %s\n", adv.title.c_str());
+    OutputDebugString(debugMsg);
+
     // 如果当前没有正在显示通知，立即处理
     if (!g_showingNotification) {
-        PostMessage(GetActiveWindow(), WM_USER + 105, 0, 0);
+        OutputDebugString(L"没有通知显示，立即处理\n");
+        if (g_hMainWnd) {
+            PostMessage(g_hMainWnd, WM_USER + 105, 0, 0);
+        }
+        else {
+            OutputDebugString(L"错误: 主窗口句柄为空！\n");
+        }
+    }
+    else {
+        OutputDebugString(L"等待当前通知结束\n");
     }
 }
 
 // 新增：处理成就队列
 void ProcessAchievementQueue() {
+    OutputDebugString(L"ProcessAchievementQueue called\n");
+
     if (g_showingNotification) {
+        OutputDebugString(L"已经有通知在显示，跳过\n");
         return;
     }
 
     std::lock_guard<std::mutex> lock(g_queueMutex);
+    OutputDebugString(L"队列大小: 需要检查\n");
+
     if (!g_achievementQueue.empty()) {
         g_showingNotification = true;
         Advancement adv = g_achievementQueue.front();
         g_achievementQueue.pop();
 
+        wchar_t debugMsg[256];
+        swprintf_s(debugMsg, L"从队列取出成就: %s\n", adv.title.c_str());
+        OutputDebugString(debugMsg);
+
         // 显示通知
         if (g_pAdvManager) {
+            OutputDebugString(L"调用ShowAdvancementNotification\n");
             g_pAdvManager->ShowAdvancementNotification(adv);
         }
+        else {
+            OutputDebugString(L"错误: g_pAdvManager为空！\n");
+        }
+    }
+    else {
+        OutputDebugString(L"队列为空\n");
     }
 }
 
@@ -589,51 +622,96 @@ void AdvancementManager::TriggerAdvancement(const std::wstring& id) {
 
             // 将成就添加到队列中，而不是立即显示
             AddAchievementToQueue(adv);
+            OutputDebugString(L"成就触发: ");
+            OutputDebugString(adv.title.c_str());
+            OutputDebugString(L"\n");
             break;
         }
     }
 }
 
 void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
+    // 每次都重新注册窗口类，确保参数正确
     WNDCLASSEX wc = {};
     wc.cbSize = sizeof(WNDCLASSEX);
     wc.lpfnWndProc = NotificationWndProc;
     wc.hInstance = hInst;
     wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
-    wc.hbrBackground = (HBRUSH)GetStockObject(NULL_BRUSH);
+    wc.hbrBackground = NULL;  // NULL背景刷，完全透明
+    wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpszClassName = L"AdvancementNotification";
 
-    static bool classRegistered = false;
-    if (!classRegistered) {
-        RegisterClassEx(&wc);
-        classRegistered = true;
+    // 尝试注销旧的窗口类，然后重新注册
+    if (UnregisterClass(L"AdvancementNotification", hInst)) {
+        OutputDebugString(L"旧窗口类已注销\n");
+    }
+    if (RegisterClassEx(&wc)) {
+        OutputDebugString(L"窗口类注册成功\n");
+    } else {
+        DWORD error = GetLastError();
+        wchar_t debugMsg[256];
+        swprintf_s(debugMsg, L"窗口类注册失败，错误代码: %d\n", error);
+        OutputDebugString(debugMsg);
     }
 
     int screenWidth = GetSystemMetrics(SM_CXSCREEN);
+    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+    int shortSide = min(screenWidth, screenHeight);
 
-    // 计算垂直位置，每个窗口间隔10像素
+    // 窗口高度为屏幕短边的1/10，保持5:1比例（宽:高）
+    int windowHeight = shortSide / 10;
+    int windowWidth = windowHeight * 5;
+
+    // 计算垂直位置，每个窗口间隔10像素（从屏幕顶部开始）
     int verticalSpacing = 10;
-    int windowHeight = 96;
     int currentCount = g_notificationCount.load();
-    int yPos = 50 + (windowHeight + verticalSpacing) * currentCount;
+    int yPos = (windowHeight + verticalSpacing) * currentCount;
 
     // 限制最大显示数量，避免超出屏幕
     if (yPos + windowHeight > GetSystemMetrics(SM_CYSCREEN)) {
-        yPos = 50;
+        yPos = 0;
     }
 
     // 增加计数
     g_notificationCount++;
 
+    // 加载自定义字体（mc_fonts.ttf）
+    std::wstring fontPath;
+    WCHAR exePath[MAX_PATH];
+    GetModuleFileName(NULL, exePath, MAX_PATH);
+    std::wstring exeDir = std::wstring(exePath).substr(0, std::wstring(exePath).find_last_of(L"\\/"));
+    fontPath = exeDir + L"\\bin\\mc_fonts.ttf";
+
+    // 检查字体文件是否存在
+    bool useCustomFont = (GetFileAttributes(fontPath.c_str()) != INVALID_FILE_ATTRIBUTES);
+    if (useCustomFont) {
+        wchar_t debugMsg[512];
+        swprintf_s(debugMsg, L"找到字体文件: %s\n", fontPath.c_str());
+        OutputDebugString(debugMsg);
+    } else {
+        OutputDebugString(L"未找到自定义字体文件，使用默认字体\n");
+    }
+
     HWND hNotifWnd = CreateWindowEx(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         L"AdvancementNotification",
         L"Achievement",
-        WS_POPUP | WS_VISIBLE,
-        screenWidth, yPos, 480, 96,
+        WS_POPUP,
+        screenWidth, yPos, windowWidth, windowHeight,
         NULL, NULL, hInst, NULL
     );
 
+    if (!hNotifWnd) {
+        DWORD error = GetLastError();
+        wchar_t errorMsg[256];
+        swprintf_s(errorMsg, L"创建通知窗口失败，错误代码: %d\n", error);
+        OutputDebugString(errorMsg);
+        return;
+    }
+
+    OutputDebugString(L"通知窗口创建成功\n");
+
+    // 恢复使用SetLayeredWindowAttributes
     SetLayeredWindowAttributes(hNotifWnd, 0, 230, LWA_ALPHA);
 
     NotificationData* pData = new NotificationData();
@@ -642,14 +720,25 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     // 加载位图
     WCHAR bgPath[MAX_PATH];
     GetModuleFileName(NULL, bgPath, MAX_PATH);
-    std::wstring exeDir = std::wstring(bgPath).substr(0, std::wstring(bgPath).find_last_of(L"\\/"));
-    std::wstring bgFile = exeDir + L"\\bin\\adv_back.png";
+    std::wstring bgExeDir = std::wstring(bgPath).substr(0, std::wstring(bgPath).find_last_of(L"\\/"));
+    std::wstring bgFile = bgExeDir + L"\\bin\\adv_back.png";
     pData->pBitmap = Gdiplus::Bitmap::FromFile(bgFile.c_str());
+
+    // 设置字体路径
+    if (useCustomFont) {
+        pData->pFontPath = new std::wstring(fontPath);
+    } else {
+        pData->pFontPath = nullptr;
+    }
 
     SetWindowLongPtr(hNotifWnd, GWLP_USERDATA, (LONG_PTR)pData);
 
     ShowWindow(hNotifWnd, SW_SHOWNOACTIVATE);
     UpdateWindow(hNotifWnd);
+
+    // 设置窗口透明度（使用UpdateLayeredWindow）
+    SetLayeredWindowAttributes(hNotifWnd, 0, 230, LWA_ALPHA);
+
     SetTimer(hNotifWnd, TIMER_NOTIFICATION_AUTO_CLOSE, 5000, NULL);
 
     if (g_pSettingsManager && g_pSettingsManager->IsSoundEnabled()) {
@@ -659,15 +748,29 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
 
         std::wstring soundFile = exeDir + L"\\bin\\adv_sound.wav";
 
+        wchar_t debugMsg[512];
+        swprintf_s(debugMsg, L"检查音效文件: %s\n", soundFile.c_str());
+        OutputDebugString(debugMsg);
+
         if (GetFileAttributes(soundFile.c_str()) == INVALID_FILE_ATTRIBUTES) {
             soundFile = exeDir + L"\\bin\\adv_sound.mp3";
+            swprintf_s(debugMsg, L"WAV文件不存在，检查MP3: %s\n", soundFile.c_str());
+            OutputDebugString(debugMsg);
             if (GetFileAttributes(soundFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                OutputDebugString(L"播放MP3音效\n");
                 PlayAudioFile(soundFile);
+            }
+            else {
+                OutputDebugString(L"音效文件不存在！\n");
             }
         }
         else {
+            OutputDebugString(L"播放WAV音效\n");
             PlaySound(soundFile.c_str(), NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
         }
+    }
+    else {
+        OutputDebugString(L"音效已禁用\n");
     }
 }
 
@@ -1180,29 +1283,68 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
     static int animationStep = 0;
     static int targetX = 0;
     static int startX = 0;
+    static int currentY = 0;
 
     switch (message) {
+    case WM_ERASEBKGND:
+        // 防止Windows清除背景，避免白色边框
+        return 1;
+
     case WM_CREATE: {
-        // 成就提示窗口：固定使用Minecraft AE字体
-        std::wstring fontName = L"Minecraft AE";
+        OutputDebugString(L"WM_CREATE called\n");
 
-        // 增加字体大小以适应更大的窗口
-        HFONT hFont = CreateFont(18, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, fontName.c_str());
+        // 确保窗口为无边框窗口
+        LONG_PTR style = GetWindowLongPtr(hWnd, GWL_STYLE);
+        if (style & WS_CAPTION) {
+            SetWindowLongPtr(hWnd, GWL_STYLE, style & ~WS_CAPTION);
+        }
 
-        // 将字体句柄存储到窗口额外数据中
-        SetWindowLongPtr(hWnd, GWLP_USERDATA + 1, (LONG_PTR)hFont);
+        // 确保分层窗口标志
+        LONG_PTR exStyle = GetWindowLongPtr(hWnd, GWL_EXSTYLE);
+        if (!(exStyle & WS_EX_LAYERED)) {
+            SetWindowLongPtr(hWnd, GWL_EXSTYLE, exStyle | WS_EX_LAYERED);
+        }
+
+        NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+        if (pData) {
+            if (pData->pAdv) {
+                wchar_t debugMsg[512];
+                swprintf_s(debugMsg, L"WM_CREATE: 成就标题=%s\n", pData->pAdv->title.c_str());
+                OutputDebugString(debugMsg);
+            }
+
+            // 加载自定义字体到系统（用于WM_PAINT中的文字绘制）
+            if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
+                int result = AddFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
+                if (result > 0) {
+                    OutputDebugString(L"自定义字体加载成功\n");
+                    wchar_t debugMsg[256];
+                    swprintf_s(debugMsg, L"字体文件: %s, 加载数量: %d\n", pData->pFontPath->c_str(), result);
+                    OutputDebugString(debugMsg);
+                    SetWindowLongPtr(hWnd, GWLP_USERDATA + 2, 1);  // 标记字体已加载
+                } else {
+                    OutputDebugString(L"自定义字体加载失败，使用默认字体\n");
+                }
+            }
+        }
 
         int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        RECT rc;
-        GetWindowRect(hWnd, &rc);
-        int currentY = rc.top;
-        int windowHeight = 96;
+        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
+        int shortSide = min(screenWidth, screenHeight);
 
-        SetWindowPos(hWnd, NULL, screenWidth, currentY, 480, 96, SWP_NOZORDER | SWP_NOACTIVATE);
+        // 窗口高度为屏幕短边的1/10，保持5:1比例（宽:高）
+        int windowHeight2 = shortSide / 10;
+        int windowWidth2 = windowHeight2 * 5;
 
-        targetX = screenWidth - 480;
+        // 窗口从屏幕顶部开始（正右上方）
+        // 计算Y坐标以支持多个通知窗口堆叠
+        int verticalSpacing = 10;
+        int currentCount = g_notificationCount.load() - 1;  // 减1是因为这个窗口已经被创建
+        currentY = (windowHeight2 + verticalSpacing) * currentCount;
+
+        SetWindowPos(hWnd, NULL, screenWidth, currentY, windowWidth2, windowHeight2, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        targetX = screenWidth - windowWidth2;
         startX = screenWidth;
         animationStep = 0;
 
@@ -1218,14 +1360,14 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 
                 int currentX = startX + (int)((targetX - startX) * easeT);
 
-                SetWindowPos(hWnd, NULL, currentX, 0, 0, 0,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+                SetWindowPos(hWnd, NULL, currentX, currentY, 0, 0,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOREDRAW | SWP_NOCOPYBITS);
 
                 animationStep++;
             }
             else {
                 KillTimer(hWnd, ANIMATION_TIMER);
-                SetWindowPos(hWnd, NULL, targetX, 0, 0, 0,
+                SetWindowPos(hWnd, NULL, targetX, currentY, 0, 0,
                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
             }
         }
@@ -1242,8 +1384,8 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 
                 int currentX = startX + (int)((targetX - startX) * easeT);
 
-                SetWindowPos(hWnd, NULL, currentX, 0, 0, 0,
-                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE);
+                SetWindowPos(hWnd, NULL, currentX, currentY, 0, 0,
+                    SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOSIZE | SWP_NOREDRAW | SWP_NOCOPYBITS);
 
                 animationStep++;
             }
@@ -1253,21 +1395,23 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                 // 清理资源
                 NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
                 if (pData) {
+                    // 卸载自定义字体
+                    if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
+                        RemoveFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
+                        OutputDebugString(L"自定义字体已卸载\n");
+                    }
+
                     if (pData->pBitmap) {
                         delete pData->pBitmap;
                     }
                     if (pData->pAdv) {
                         delete pData->pAdv;
                     }
+                    if (pData->pFontPath) {
+                        delete pData->pFontPath;
+                    }
                     delete pData;
-                    SetWindowLongPtr(hWnd, GWLP_USERDATA, 0); // 标记为已清理
-                }
-
-                // 删除字体
-                HFONT hFont = (HFONT)GetWindowLongPtr(hWnd, GWLP_USERDATA + 1);
-                if (hFont) {
-                    DeleteObject(hFont);
-                    SetWindowLongPtr(hWnd, GWLP_USERDATA + 1, 0); // 标记为已清理
+                    SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
                 }
 
                 // 减少通知计数
@@ -1275,7 +1419,9 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                 g_showingNotification = false;
 
                 // 显示下一个成就
-                PostMessage(GetActiveWindow(), WM_USER + 105, 0, 0);
+                if (g_hMainWnd) {
+                    PostMessage(g_hMainWnd, WM_USER + 105, 0, 0);
+                }
 
                 DestroyWindow(hWnd);
             }
@@ -1283,30 +1429,40 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         break;
 
     case WM_PAINT: {
+        OutputDebugString(L"NotificationWndProc WM_PAINT called\n");
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
 
+        // 获取窗口大小（动态计算）
+        RECT rc;
+        GetWindowRect(hWnd, &rc);
+        int windowWidth = rc.right - rc.left;
+        int windowHeight = rc.bottom - rc.top;
+
         HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, 480, 96);
+        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, windowWidth, windowHeight);
         HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
 
-        // 从窗口数据获取位图
+        // 不清除背景，直接绘制PNG
         NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (pData && pData->pBitmap && pData->pBitmap->GetLastStatus() == Gdiplus::Ok) {
             Gdiplus::Graphics graphics(hdcMem);
-            graphics.DrawImage(pData->pBitmap, 0, 0, 480, 96);
+            graphics.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+            graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+            graphics.DrawImage(pData->pBitmap, 0, 0, windowWidth, windowHeight);
         }
         else {
             // 如果位图不存在，使用默认背景
             HBRUSH hBrush = CreateSolidBrush(RGB(0, 100, 0));
-            RECT rc = { 0, 0, 480, 96 };
-            FillRect(hdcMem, &rc, hBrush);
+            RECT rcFill = { 0, 0, windowWidth, windowHeight };
+            FillRect(hdcMem, &rcFill, hBrush);
             DeleteObject(hBrush);
 
             HPEN hPen = CreatePen(PS_SOLID, 2, RGB(255, 215, 0));
             HPEN hOldPen = (HPEN)SelectObject(hdcMem, hPen);
             HBRUSH hOldBrush = (HBRUSH)SelectObject(hdcMem, GetStockObject(NULL_BRUSH));
-            Rectangle(hdcMem, 1, 1, 479, 95);
+            Rectangle(hdcMem, 1, 1, windowWidth - 1, windowHeight - 1);
             SelectObject(hdcMem, hOldPen);
             SelectObject(hdcMem, hOldBrush);
             DeleteObject(hPen);
@@ -1314,37 +1470,75 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 
         if (pData && pData->pAdv) {
             SetBkMode(hdcMem, TRANSPARENT);
+
+            // 使用GDI+ PrivateFontCollection加载自定义字体获取真实字体名
+            Gdiplus::PrivateFontCollection privateFontCollection;
+            std::wstring actualFontName = L"微软雅黑";  // 默认字体
+
+            if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
+                Gdiplus::Status status = privateFontCollection.AddFontFile(pData->pFontPath->c_str());
+                if (status == Gdiplus::Ok) {
+                    // 获取字体家族名称
+                    int numFound = 0;
+                    Gdiplus::FontFamily fontFamily;
+                    privateFontCollection.GetFamilies(1, &fontFamily, &numFound);
+                    if (numFound > 0) {
+                        WCHAR familyName[256] = {0};
+                        fontFamily.GetFamilyName(familyName, LANG_NEUTRAL);
+                        actualFontName = familyName;
+                        wchar_t debugMsg[512];
+                        swprintf_s(debugMsg, L"使用自定义字体: %s\n", actualFontName.c_str());
+                        OutputDebugString(debugMsg);
+                    }
+                } else {
+                    OutputDebugString(L"加载字体文件失败\n");
+                }
+            }
+
+            // "获得成就"字体大小为窗口高度的约21%
+            int baseFontSize = windowHeight * 21 / 100;
+            HFONT hBaseFont = CreateFont(baseFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, actualFontName.c_str());
+
+            // 成就名称字体大小为窗口高度的40%
+            int advFontSize = windowHeight * 40 / 100;
+            HFONT hAdvFont = CreateFont(advFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, actualFontName.c_str());
+
+            // 绘制"获得成就"（黄色）
+            int padding = windowWidth / 24;
+            RECT rcTitle = { padding, windowHeight * 8 / 100, windowWidth - padding, windowHeight * 35 / 100 };
             SetTextColor(hdcMem, RGB(255, 215, 0));
+            HFONT hOldFont = (HFONT)SelectObject(hdcMem, hBaseFont);
+            DrawText(hdcMem, L"获得成就", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            HFONT hFont = (HFONT)GetWindowLongPtr(hWnd, GWLP_USERDATA + 1);
-            HFONT hOldFont = NULL;
-            if (hFont) {
-                hOldFont = (HFONT)SelectObject(hdcMem, hFont);
-            }
-
-            // 调整文本位置以适应更大的窗口
-            RECT rc = { 20, 10, 460, 40 };
-            DrawText(hdcMem, L"获得成就", -1, &rc, DT_LEFT);
-
-            rc.top = 40;
-            rc.bottom = 90;
-            // 显示更完整的标题
+            // 绘制成就名称（黄色）
+            RECT rcAdv = { padding, windowHeight * 40 / 100, windowWidth - padding, windowHeight * 90 / 100 };
             std::wstring displayTitle = pData->pAdv->title;
-            if (displayTitle.length() > 25) {
-                displayTitle = displayTitle.substr(0, 25) + L"...";
+            int maxTitleLength = windowWidth / 13;
+            if (displayTitle.length() > maxTitleLength) {
+                displayTitle = displayTitle.substr(0, maxTitleLength) + L"...";
             }
-            DrawText(hdcMem, displayTitle.c_str(), -1, &rc, DT_LEFT);
+            SelectObject(hdcMem, hAdvFont);
+            DrawText(hdcMem, displayTitle.c_str(), -1, &rcAdv, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            if (hOldFont) {
-                SelectObject(hdcMem, hOldFont);
-            }
+            // 恢复并清理字体
+            SelectObject(hdcMem, hOldFont);
+            DeleteObject(hBaseFont);
+            DeleteObject(hAdvFont);
         }
 
-        BitBlt(hdc, 0, 0, 480, 96, hdcMem, 0, 0, SRCCOPY);
+        BitBlt(hdc, 0, 0, windowWidth, windowHeight, hdcMem, 0, 0, SRCCOPY);
 
         SelectObject(hdcMem, hbmOld);
         DeleteObject(hbmMem);
         DeleteDC(hdcMem);
+
+        // 使用UpdateLayeredWindow来正确处理透明度（避免白色边框）
+        // 注意：我们不使用它，因为BeginPaint/EndPaint已经有正确的处理
+        // 真正的问题可能是GDI+在绘制PNG时没有正确处理Alpha通道
 
         EndPaint(hWnd, &ps);
         break;
@@ -1355,21 +1549,23 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         // 清理资源
         NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (pData) {
+            // 卸载自定义字体
+            if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
+                RemoveFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
+                OutputDebugString(L"WM_DESTROY: 自定义字体已卸载\n");
+            }
+
             if (pData->pBitmap) {
                 delete pData->pBitmap;
             }
             if (pData->pAdv) {
                 delete pData->pAdv;
             }
+            if (pData->pFontPath) {
+                delete pData->pFontPath;
+            }
             delete pData;
             SetWindowLongPtr(hWnd, GWLP_USERDATA, 0);
-        }
-
-        // 删除字体
-        HFONT hFont = (HFONT)GetWindowLongPtr(hWnd, GWLP_USERDATA + 1);
-        if (hFont) {
-            DeleteObject(hFont);
-            SetWindowLongPtr(hWnd, GWLP_USERDATA + 1, 0);
         }
 
         // 减少通知计数（如果还没有减少）
@@ -1378,7 +1574,9 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
             g_showingNotification = false;
 
             // 显示下一个成就
-            PostMessage(GetActiveWindow(), WM_USER + 105, 0, 0);
+            if (g_hMainWnd) {
+                PostMessage(g_hMainWnd, WM_USER + 105, 0, 0);
+            }
         }
 
         // 杀掉所有定时器
@@ -1411,6 +1609,9 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             PostQuitMessage(1);
             break;
         }
+
+        // 保存主窗口句柄
+        g_hMainWnd = hWnd;
 
         // 创建成就管理器
         g_pAdvManager = new (std::nothrow) AdvancementManager(hWnd);
@@ -1656,6 +1857,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_USER + 105: {  // 处理成就队列
+        OutputDebugString(L"收到WM_USER + 105消息\n");
         ShowNextAchievement(hWnd);
         break;
     }
