@@ -37,10 +37,10 @@ HWND g_hMainWnd = nullptr;  // 全局主窗口句柄
 HWND g_hDownloadWnd = nullptr;
 HWND g_hProgressBar = nullptr;
 HWND g_hStatusText = nullptr;
-HWND g_hCancelButton = nullptr;  // 新增：取消按钮
+HWND g_hCancelButton = nullptr;  // 取消按钮
 std::thread g_downloadThread;
 std::atomic<bool> g_bDownloading(false);
-std::atomic<bool> g_bDownloadCanceled(false);  // 新增：下载取消标志
+std::atomic<bool> g_bDownloadCanceled(false);  // 下载取消标志
 
 // 成就通知队列
 std::queue<Advancement> g_achievementQueue;
@@ -53,24 +53,25 @@ BOOL InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK NotificationWndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK DownloadWndProc(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK about(HWND, UINT, WPARAM, LPARAM);
 void RestartApplication();
 
-// 添加：下载成就列表函数
+// 下载成就列表函数
 bool DownloadAdvancementJson(HWND hWnd);
 void ShowDownloadWindow(HWND hParent);
 void CloseDownloadWindow();
 void UpdateDownloadProgress(int progress, const std::wstring& status);
 
-// 新增：解析版本信息函数
+// 解析版本信息函数
 std::wstring ExtractJSONVersion(const std::string& jsonContent);
 
-// 新增：比较版本函数
+// 比较版本函数
 bool IsNewerVersion(const std::wstring& currentVersion, const std::wstring& newVersion);
 
-// 新增：取消下载函数
+// 取消下载函数
 void CancelDownload();
 
-// 新增：处理成就通知队列
+// 处理成就通知队列
 void ProcessAchievementQueue();
 void AddAchievementToQueue(const Advancement& adv);
 void ShowNextAchievement(HWND hMainWnd);
@@ -1625,11 +1626,6 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             PostQuitMessage(1);
             break;
         }
-
-        // 创建版本信息字体
-        hVersionFont = CreateFont(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
         break;
     }
 
@@ -1644,14 +1640,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_COMMAND: {
         int wmId = LOWORD(wParam);
-        if (wmId == IDM_HELP_ABOUT) {
-            MessageBox(hWnd, L"MC Advancements on Windows \nversion : beta-2026.4.26 \n检测Windows操作并解锁成就！",
-                L"关于", MB_OK);
+        if (wmId == IDM_ABOUT) {
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, about);
         }
         else if (wmId == IDM_FILE_EXIT) {
             DestroyWindow(hWnd);
         }
-        else if (wmId == IDM_FILE_UPDATE_JSON) {  // 新增：更新成就列表
+        else if (wmId == IDM_FILE_UPDATE_JSON) {  // 更新成就列表
             DownloadAdvancementJson(hWnd);
         }
         else if (wmId == IDM_SETTINGS_SOUND) {
@@ -1990,4 +1985,24 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     Gdiplus::GdiplusShutdown(g_gdiplusToken);
     return (int)msg.wParam;
+}
+
+// “关于”框的消息处理程序。
+INT_PTR CALLBACK about(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    UNREFERENCED_PARAMETER(lParam);
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
+        {
+            EndDialog(hDlg, LOWORD(wParam));
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
 }

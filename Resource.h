@@ -13,7 +13,6 @@
 #define IDM_SETTINGS_SOUND      200
 #define IDM_SETTINGS_CLEAR_SAVE 201
 #define IDM_FILE_UPDATE_JSON    202
-#define IDM_HELP_ABOUT          203
 #define ID_LIST_COMPLETED       300
 #define ID_LIST_UNCOMPLETED     301
 #define TIMER_CHECK_WINDOWS     1
@@ -22,6 +21,9 @@
 #define TIMER_NOTIFICATION_SLIDE_OUT 4
 #define ANIMATION_STEPS         20
 #define ANIMATION_INTERVAL      16
+#ifndef IDC_STATIC
+#define IDC_STATIC				-1
+#endif
 
 // Next default values for new objects
 //
