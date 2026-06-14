@@ -47,9 +47,10 @@ class SettingsManager {
 private:
     std::wstring configFilePath;
     bool soundEnabled;
+    bool showTriggerInfo;
 
 public:
-    SettingsManager() : soundEnabled(true) {
+    SettingsManager() : soundEnabled(true), showTriggerInfo(false) {
         WCHAR exePath[MAX_PATH];
         GetModuleFileName(NULL, exePath, MAX_PATH);
         std::wstring exeDir = std::wstring(exePath).substr(0, std::wstring(exePath).find_last_of(L"\\/"));
@@ -58,6 +59,7 @@ public:
 
     void LoadSettings() {
         soundEnabled = true;
+        showTriggerInfo = false;
 
         std::wifstream file(configFilePath);
         if (file.is_open()) {
@@ -71,6 +73,9 @@ public:
                     if (key == L"sound") {
                         soundEnabled = (value == L"1" || value == L"true");
                     }
+                    else if (key == L"show_trigger") {
+                        showTriggerInfo = (value == L"1" || value == L"true");
+                    }
                 }
             }
             file.close();
@@ -81,12 +86,16 @@ public:
         std::wofstream file(configFilePath);
         if (file.is_open()) {
             file << L"sound=" << (soundEnabled ? L"1" : L"0") << std::endl;
+            file << L"show_trigger=" << (showTriggerInfo ? L"1" : L"0") << std::endl;
             file.close();
         }
     }
 
     bool IsSoundEnabled() const { return soundEnabled; }
     void SetSoundEnabled(bool enabled) { soundEnabled = enabled; }
+
+    bool IsShowTriggerInfo() const { return showTriggerInfo; }
+    void SetShowTriggerInfo(bool show) { showTriggerInfo = show; }
 
     void UpdateSoundMenuItem(HWND hWnd, HMENU hMenu) {
         if (hMenu) {
@@ -95,10 +104,11 @@ public:
         }
     }
 
-    void UpdateAllMenuItems(HWND hWnd) {  // 更新所有菜单项
+    void UpdateAllMenuItems(HWND hWnd) {
         HMENU hMenu = GetMenu(hWnd);
         if (hMenu) {
             UpdateSoundMenuItem(hWnd, hMenu);
+            CheckMenuItem(hMenu, IDM_SETTINGS_SHOW_TRIGGER, showTriggerInfo ? MF_CHECKED : MF_UNCHECKED);
         }
     }
 };
