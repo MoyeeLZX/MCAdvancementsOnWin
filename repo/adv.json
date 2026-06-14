@@ -20,6 +20,15 @@
             "trigger_description": "含'记事本'或'notepad'的窗口",
             "trigger_type": "window_title",
             "trigger_value": "记事本|notepad"
+        },
+        {
+            "num": "3",
+            "id": "regedit",
+            "title": "注册...什么呢？",
+            "description":"让我看看你都注册了什么",
+            "trigger_description":"打开注册表编辑器",
+            "trigger_type": "process_name",
+            "trigger_value": "regedit.exe"
         }
     ]
 }
