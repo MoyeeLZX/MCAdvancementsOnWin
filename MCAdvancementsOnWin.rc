@@ -47,9 +47,9 @@ CAPTION "关于 MC Advancements on Windows"
 FONT 9, "MS Shell Dlg"
 BEGIN
 ICON            IDI_MCADVANCEMENTSONWIN, IDC_STATIC, 14, 14, 21, 20
-LTEXT           "MC Advancements on Windows, 版本 beta-2026.6.14", IDC_STATIC, 42, 14, 200, 8, SS_NOPREFIX
+LTEXT           "MC Advancements on Windows, 版本 beta-2026.7.4", IDC_STATIC, 42, 14, 200, 8, SS_NOPREFIX
 LTEXT           "版权所有(c) 2026", IDC_STATIC, 42, 26, 114, 8
-LTEXT           "https://github.com/MoyeeLZX/MCAdvancementsOnWin", IDC_STATIC, 14, 38, 200, 8, SS_NOPREFIX
+EDITTEXT        IDC_ABOUT_LINK, 14, 38, 200, 12, ES_READONLY | ES_AUTOHSCROLL | NOT WS_BORDER
 DEFPUSHBUTTON   "确定", IDOK, 165, 50, 50, 14, WS_GROUP
 END
 
@@ -76,12 +76,12 @@ BLOCK "040904b0"
 BEGIN
 VALUE "CompanyName", "mylzx@2btb.top"
 VALUE "FileDescription", "MC Advancements on Windows"
-VALUE "FileVersion", "beta-2026.6.14"
+VALUE "FileVersion", "beta-2026.7.4"
 VALUE "InternalName", "MCAdvancementsOnWin"
 VALUE "LegalCopyright", "版权所有 (C) 2026"
 VALUE "OriginalFilename", "MCAdvancementsOnWin.exe"
 VALUE "ProductName", "MC Advancements on Windows"
-VALUE "ProductVersion", "beta-2026.6.14"
+VALUE "ProductVersion", "beta-2026.7.4"
 END
 END
 BLOCK "VarFileInfo"
