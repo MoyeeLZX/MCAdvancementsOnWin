@@ -26,12 +26,13 @@ enum AdvancementTriggerType {
 
 struct Advancement {
     std::wstring id;
-    std::wstring num;  // 新增：成就编号
+    std::wstring num;
     std::wstring title;
     std::wstring description;
     std::wstring triggerDescription;
     std::wstring triggerValue;
     AdvancementTriggerType triggerType;
+    std::wstring iconBase64;  // Base64编码的图标数据
     bool completed = false;
 };
 
@@ -39,6 +40,7 @@ struct Advancement {
 struct NotificationData {
     Advancement* pAdv;
     Gdiplus::Bitmap* pBitmap;
+    Gdiplus::Bitmap* pIconBitmap;  // Base64解码后的成就图标
     std::wstring* pFontPath;  // 字体文件路径（可选）
 };
 

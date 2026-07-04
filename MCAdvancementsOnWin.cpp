@@ -196,6 +196,83 @@ std::wstring UTF8ToWString(const std::string& utf8) {
     return wstrTo;
 }
 
+std::vector<BYTE> Base64Decode(const std::string& encoded) {
+    static const std::string base64_chars =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    std::vector<BYTE> decoded;
+    std::vector<int> T(256, -1);
+    for (int i = 0; i < 64; i++) T[base64_chars[i]] = i;
+
+    int val = 0, valb = -8;
+    for (unsigned char c : encoded) {
+        if (T[c] == -1) break;
+        val = (val << 6) + T[c];
+        valb += 6;
+        if (valb >= 0) {
+            decoded.push_back(static_cast<BYTE>((val >> valb) & 0xFF));
+            valb -= 8;
+        }
+    }
+    return decoded;
+}
+
+Gdiplus::Bitmap* BitmapFromBase64DataURI(const std::wstring& dataUri) {
+    if (dataUri.empty()) return nullptr;
+
+    const std::wstring base64Prefix = L"base64,";
+    size_t base64Pos = dataUri.find(base64Prefix);
+    std::string base64Data;
+    if (base64Pos != std::wstring::npos) {
+        std::wstring encoded = dataUri.substr(base64Pos + base64Prefix.length());
+        base64Data.reserve(encoded.size());
+        for (wchar_t wc : encoded) {
+            base64Data.push_back(static_cast<char>(wc));
+        }
+    }
+    else {
+        base64Data.reserve(dataUri.size());
+        for (wchar_t wc : dataUri) {
+            base64Data.push_back(static_cast<char>(wc));
+        }
+    }
+
+    base64Data.erase(std::remove_if(base64Data.begin(), base64Data.end(),
+        [](char c) { return c == '\n' || c == '\r' || c == ' '; }), base64Data.end());
+
+    if (base64Data.empty()) return nullptr;
+
+    std::vector<BYTE> imageData = Base64Decode(base64Data);
+    if (imageData.empty()) return nullptr;
+
+    HGLOBAL hGlobal = GlobalAlloc(GMEM_MOVEABLE, imageData.size());
+    if (!hGlobal) return nullptr;
+
+    void* pBuffer = GlobalLock(hGlobal);
+    if (!pBuffer) {
+        GlobalFree(hGlobal);
+        return nullptr;
+    }
+    memcpy(pBuffer, imageData.data(), imageData.size());
+    GlobalUnlock(hGlobal);
+
+    IStream* pStream = nullptr;
+    if (CreateStreamOnHGlobal(hGlobal, TRUE, &pStream) != S_OK) {
+        GlobalFree(hGlobal);
+        return nullptr;
+    }
+
+    Gdiplus::Bitmap* pBitmap = Gdiplus::Bitmap::FromStream(pStream);
+    pStream->Release();
+
+    if (pBitmap && pBitmap->GetLastStatus() != Gdiplus::Ok) {
+        delete pBitmap;
+        return nullptr;
+    }
+
+    return pBitmap;
+}
+
 std::string ReadFileAsUTF8(const std::wstring& filePath) {
     std::ifstream file(filePath, std::ios::binary);
     if (!file.is_open()) {
@@ -448,6 +525,9 @@ bool AdvancementManager::LoadAdvancementsFromJSON() {
                         currentAdv.triggerType = TRIGGER_NONE;
                     }
                 }
+                else if ((value = ExtractJSONValue(line, "icon_base64")) != L"") {
+                    currentAdv.iconBase64 = value;
+                }
 
                 if (trimmedLine.find('}') != std::string::npos) {
                     inObject = false;
@@ -686,6 +766,15 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     std::wstring bgFile = bgExeDir + L"\\bin\\adv_back.png";
     pData->pBitmap = Gdiplus::Bitmap::FromFile(bgFile.c_str());
 
+    if (!adv.iconBase64.empty()) {
+        pData->pIconBitmap = BitmapFromBase64DataURI(adv.iconBase64);
+    }
+    else {
+        pData->pIconBitmap = BitmapFromBase64DataURI(
+            L"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAE7mlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgOS4xLWMwMDIgNzkuNzhiNzYzOCwgMjAyNS8wMi8xMS0xOToxMDowOCAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczpkYz0iaHR0cDovL3B1cmwub3JnL2RjL2VsZW1lbnRzLzEuMS8iIHhtbG5zOnBob3Rvc2hvcD0iaHR0cDovL25zLmFkb2JlLmNvbS9waG90b3Nob3AvMS4wLyIgeG1sbnM6eG1wTU09Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8iIHhtbG5zOnN0RXZ0PSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvc1R5cGUvUmVzb3VyY2VFdmVudCMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIDI2LjUgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wNi0xNFQxNDo0NDo1OSswODowMCIgeG1wOk1vZGlmeURhdGU9IjIwMjYtMDYtMTRUMTU6MDQ6MDArMDg6MDAiIHhtcDpNZXRhZGF0YURhdGU9IjIwMjYtMDYtMTRUMTU6MDQ6MDArMDg6MDAiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjYyOWNhNTU4LTFmZjctODE0ZS04YTA1LWM2YTgwNzY3ZTE5MyIgeG1wTU06RG9jdW1lbnRJRD0ieG1wLmRpZDo2MjljYTU1OC0xZmY3LTgxNGUtOGEwNS1jNmE4MDc2N2UxOTMiIHhtcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDo2MjljYTU1OC0xZmY3LTgxNGUtOGEwNS1jNmE4MDc2N2UxOTMiPiA8eG1wTU06SGlzdG9yeT4gPHJkZjpTZXE+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjcmVhdGVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOjYyOWNhNTU4LTFmZjctODE0ZS04YTA1LWM2YTgwNzY3ZTE5MyIgc3RFdnQ6d2hlbj0iMjAyNi0wNi0xNFQxNDo0NDo1OSswODowMCIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIDI2LjUgKFdpbmRvd3MpIi8+IDwvcmRmOlNlcT4gPC94bXBNTTpIaXN0b3J5PiA8L3JkZjpEZXNjcmlwdGlvbj4gPC9yZGY6UkRGPiA8L3g6eG1wbWV0YT4gPD94cGFja2V0IGVuZD0iciI/PlHbY14AAAKmSURBVHic7ZtNboMwFISfQ1acoYtw/0M1i56gi66w6MpVQ8Ce92un6kiVUArPMPPZ/Dpt20bRyjnfiIimr+s7EVGe14WIaJqme/S+XKIb3B/87+Xyv0iFG0D0ePC13yIUagCScDQF4QTUku5BQZgBnGQjKQglAEk4moIQAySJRlEQRgAn2UgK3A2oJZnndSkXQdxtrRRCgCTRKApcDWilf7TMqWEhdwKq5/1puteu/yMocDMATb/2G1JLK1cCWukfLXNqWOjqURRJf79OSuktz+tydsA555vH7bKLAUT8q748r0tK6e1svVoX0ci8C6B9f2/Q/uEIt7ZULmMA2vf32rbtQ1JTI1MDuCO/ZF1rCswJkKaPrONBgZkBVukj21hSYEqANn1kXWsKTAywTh/Z1ooCMwKs0ke2saRAbYBX+kgNCwpMCLBOH9nWigKVAd7pI7W0FKgJ8EofqWFBgdiAqPSRmhoKVAR4p4/U0lIgMiA6faS2lAIxAVHpIzU1FLAN6JU+0oaEAhEB0ekjtaUUsAzonT7SFpcCNgG90kfakFAAGzBK+kibHApYBPROH2mLSwFkwGjpI22jFMAEWKe/33mukVYUNA3wSL/sfPk+QPOhpJYC6M2QR9+3ulM8O0j0bVKVgFH7/l4aCppdYJSRX7IPyFhwasCrpF8kpaBKwOjpF2koODTg1dIvklBwehaISP9opzRnFckZ4YmAsCe9v+YNlL9W+1BdJgWHXcA7/aNJE612EUnGggcDIvu+58dPHAqeCHiVkf9MXAp+DBhh5O/xNumBgMj0z+4Go98mXYji07e8G6wJoeDnOmCk5/xW9ZHrgssIfd9TLQquRO1TUo8Jjd4qFFQfiPSazBiptH1S/OThgdRl6uxI+jfgL4z0UuV5Xb4BpNcoyLX8aZgAAAAASUVORK5CYII="
+        );
+    }
+
     if (useCustomFont) {
         pData->pFontPath = new std::wstring(fontPath);
     } else {
@@ -721,7 +810,14 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
                 PlayAudioFile(soundFile);
             }
             else {
-                OutputDebugString(L"音效文件不存在！\n");
+                soundFile = exeDir + L"\\bin\\adv_soud.mp3";
+                if (GetFileAttributes(soundFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
+                    OutputDebugString(L"播放MP3音效(旧文件名)\n");
+                    PlayAudioFile(soundFile);
+                }
+                else {
+                    OutputDebugString(L"音效文件不存在！\n");
+                }
             }
         }
         else {
@@ -1333,6 +1429,9 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                         OutputDebugString(L"自定义字体已卸载\n");
                     }
 
+                    if (pData->pIconBitmap) {
+                        delete pData->pIconBitmap;
+                    }
                     if (pData->pBitmap) {
                         delete pData->pBitmap;
                     }
@@ -1420,6 +1519,24 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                 }
             }
 
+            int iconAreaWidth = 0;
+            int iconPadding = windowWidth / 24;
+
+            if (pData->pIconBitmap && pData->pIconBitmap->GetLastStatus() == Gdiplus::Ok) {
+                int iconSize = windowHeight * 50 / 100;
+                iconAreaWidth = iconSize + iconPadding;
+
+                int iconX = iconPadding;
+                int iconY = (windowHeight - iconSize) / 2;
+
+                Gdiplus::Graphics iconGraphics(hdcMem);
+                iconGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQuality);
+                iconGraphics.DrawImage(pData->pIconBitmap, iconX, iconY, iconSize, iconSize);
+            }
+
+            int textLeft = iconAreaWidth + iconPadding;
+            int padding = windowWidth / 24;
+
             int baseFontSize = windowHeight * 21 / 100;
             HFONT hBaseFont = CreateFont(baseFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -1430,15 +1547,15 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, actualFontName.c_str());
 
-            int padding = windowWidth / 24;
-            RECT rcTitle = { padding, windowHeight * 8 / 100, windowWidth - padding, windowHeight * 35 / 100 };
+            RECT rcTitle = { textLeft, windowHeight * 8 / 100, windowWidth - padding, windowHeight * 35 / 100 };
             SetTextColor(hdcMem, RGB(255, 215, 0));
             HFONT hOldFont = (HFONT)SelectObject(hdcMem, hBaseFont);
             DrawText(hdcMem, L"获得成就", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-            RECT rcAdv = { padding, windowHeight * 40 / 100, windowWidth - padding, windowHeight * 90 / 100 };
+            RECT rcAdv = { textLeft, windowHeight * 40 / 100, windowWidth - padding, windowHeight * 90 / 100 };
             std::wstring displayTitle = pData->pAdv->title;
-            int maxTitleLength = windowWidth / 13;
+            int maxTitleLength = (windowWidth - textLeft) / 13;
+            if (maxTitleLength < 5) maxTitleLength = 5;
             if (displayTitle.length() > maxTitleLength) {
                 displayTitle = displayTitle.substr(0, maxTitleLength) + L"...";
             }
@@ -1468,6 +1585,9 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                 OutputDebugString(L"WM_DESTROY: 自定义字体已卸载\n");
             }
 
+            if (pData->pIconBitmap) {
+                delete pData->pIconBitmap;
+            }
             if (pData->pBitmap) {
                 delete pData->pBitmap;
             }
@@ -1884,7 +2004,14 @@ INT_PTR CALLBACK about(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
     switch (message)
     {
     case WM_INITDIALOG:
-        return (INT_PTR)TRUE;
+    {
+        HWND hLink = GetDlgItem(hDlg, IDC_ABOUT_LINK);
+        if (hLink) {
+            SetWindowText(hLink, L"https://github.com/MoyeeLZX/MCAdvancementsOnWin");
+        }
+        SendMessage(hDlg, WM_NEXTDLGCTL, (WPARAM)GetDlgItem(hDlg, IDOK), TRUE);
+        return (INT_PTR)FALSE;
+    }
 
     case WM_COMMAND:
         if (LOWORD(wParam) == IDOK || LOWORD(wParam) == IDCANCEL)
