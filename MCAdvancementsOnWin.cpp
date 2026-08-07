@@ -606,6 +606,20 @@ bool AdvancementManager::CheckWindowTitle(const std::wstring& targetTitle) {
 bool AdvancementManager::CheckProcessExists(const std::wstring& processName) {
     if (processName.empty()) return false;
 
+    std::vector<std::wstring> names;
+    size_t start = 0, end = 0;
+    while ((end = processName.find(L'|', start)) != std::wstring::npos) {
+        std::wstring name = processName.substr(start, end - start);
+        if (!name.empty()) {
+            names.push_back(name);
+        }
+        start = end + 1;
+    }
+    std::wstring lastName = processName.substr(start);
+    if (!lastName.empty()) {
+        names.push_back(lastName);
+    }
+
     HANDLE hSnapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (hSnapshot == INVALID_HANDLE_VALUE) {
         return false;
@@ -616,9 +630,11 @@ bool AdvancementManager::CheckProcessExists(const std::wstring& processName) {
 
     if (Process32FirstW(hSnapshot, &pe32)) {
         do {
-            if (_wcsicmp(pe32.szExeFile, processName.c_str()) == 0) {
-                CloseHandle(hSnapshot);
-                return true;
+            for (const auto& name : names) {
+                if (_wcsicmp(pe32.szExeFile, name.c_str()) == 0) {
+                    CloseHandle(hSnapshot);
+                    return true;
+                }
             }
         } while (Process32NextW(hSnapshot, &pe32));
     }
