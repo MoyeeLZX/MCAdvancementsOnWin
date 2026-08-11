@@ -1,4 +1,4 @@
-#include "MCAdvancementsOnWin.h"
+Ôªø#include "MCAdvancementsOnWin.h"
 #include "resource.h"
 #include <fstream>
 #include <shellapi.h>
@@ -46,12 +46,86 @@ std::mutex g_queueMutex;
 std::atomic<bool> g_showingNotification(false);
 std::atomic<int> g_notificationCount(0);
 
+// Á≥ªÁªüÊâòÁõòÔºàÈÄöÁü•Âå∫ÂüüÔºâÁõ∏ÂÖ≥
+#define WM_TRAYICON (WM_USER + 200)
+
+NOTIFYICONDATAW g_nid = { 0 };
+UINT g_uTaskbarRestart = 0;
+
+void AddTrayIcon(HWND hWnd) {
+    g_nid.cbSize = sizeof(NOTIFYICONDATAW);
+    g_nid.hWnd = hWnd;
+    g_nid.uID = 1;
+    g_nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    g_nid.uCallbackMessage = WM_TRAYICON;
+    g_nid.hIcon = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDI_MCADVANCEMENTSONWIN),
+        IMAGE_ICON, GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR);
+    if (!g_nid.hIcon) {
+        g_nid.hIcon = LoadIcon(hInst, MAKEINTRESOURCE(IDI_MCADVANCEMENTSONWIN));
+    }
+    wcscpy_s(g_nid.szTip, _countof(g_nid.szTip), L"MC Advancements on Windows");
+    BOOL bAdded = Shell_NotifyIcon(NIM_ADD, &g_nid);
+    if (bAdded) {
+        OutputDebugString(L"[Tray] NIM_ADD ÊàêÂäüÔºåÊâòÁõòÂõæÊ†áÂ∑≤ÂàõÂª∫\n");
+    }
+    else {
+        wchar_t buf[128];
+        swprintf_s(buf, L"[Tray] NIM_ADD Â§±Ë¥•, GetLastError=%lu\n", GetLastError());
+        OutputDebugString(buf);
+    }
+}
+
+void RemoveTrayIcon() {
+    Shell_NotifyIcon(NIM_DELETE, &g_nid);
+    if (g_nid.hIcon) {
+        DestroyIcon(g_nid.hIcon);
+        g_nid.hIcon = NULL;
+    }
+}
+
+void ShowTrayMenu(HWND hWnd) {
+    static bool bShowing = false;
+    if (bShowing) return;
+    bShowing = true;
+
+    HMENU hMenu = LoadMenu(hInst, MAKEINTRESOURCE(IDR_TRAY_MENU));
+    if (!hMenu) {
+        OutputDebugString(L"[Tray] LoadMenu Â§±Ë¥•ÔºåËèúÂçïËµÑÊ∫êÊú™ÊâæÂà∞\n");
+        bShowing = false;
+        return;
+    }
+
+    HMENU hSubMenu = GetSubMenu(hMenu, 0);
+    if (!hSubMenu) {
+        OutputDebugString(L"[Tray] GetSubMenu Â§±Ë¥•ÔºåËèúÂçïÁªìÊûÑÈîôËØØ\n");
+        DestroyMenu(hMenu);
+        bShowing = false;
+        return;
+    }
+
+    if (g_pSettingsManager) {
+        CheckMenuItem(hSubMenu, ID_TRAY_SOUND,
+            g_pSettingsManager->IsSoundEnabled() ? MF_CHECKED : MF_UNCHECKED);
+    }
+
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(hWnd);
+    TrackPopupMenu(hSubMenu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN,
+        pt.x, pt.y, 0, hWnd, NULL);
+    PostMessage(hWnd, WM_NULL, 0, 0);
+    DestroyMenu(hMenu);
+
+    bShowing = false;
+}
+
 ATOM MyRegisterClass(HINSTANCE hInstance);
 BOOL InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK NotificationWndProc(HWND, UINT, WPARAM, LPARAM);
 LRESULT CALLBACK DownloadWndProc(HWND, UINT, WPARAM, LPARAM);
 INT_PTR CALLBACK about(HWND, UINT, WPARAM, LPARAM);
+INT_PTR CALLBACK CloseConfirmProc(HWND, UINT, WPARAM, LPARAM);
 void RestartApplication();
 
 bool DownloadAdvancementJson(HWND hWnd);
@@ -124,20 +198,20 @@ void AddAchievementToQueue(const Advancement& adv) {
     g_achievementQueue.push(adv);
 
     wchar_t debugMsg[256];
-    swprintf_s(debugMsg, L"≥…æÕ“—ÃÌº”µΩ∂”¡–: %s\n", adv.title.c_str());
+    swprintf_s(debugMsg, L"ÊàêÂ∞±Â∑≤Ê∑ªÂä†Âà∞ÈòüÂàó: %s\n", adv.title.c_str());
     OutputDebugString(debugMsg);
 
     if (!g_showingNotification) {
-        OutputDebugString(L"√ª”–Õ®÷™œ‘ æ£¨¡¢º¥¥¶¿Ì\n");
+        OutputDebugString(L"Ê≤°ÊúâÈÄöÁü•ÊòæÁ§∫ÔºåÁ´ãÂç≥Â§ÑÁêÜ\n");
         if (g_hMainWnd) {
             PostMessage(g_hMainWnd, WM_USER + 105, 0, 0);
         }
         else {
-            OutputDebugString(L"¥ÌŒÛ: ÷˜¥∞ø⁄æ‰±˙Œ™ø’£°\n");
+            OutputDebugString(L"ÈîôËØØ: ‰∏ªÁ™óÂè£Âè•ÊüÑ‰∏∫Á©∫ÔºÅ\n");
         }
     }
     else {
-        OutputDebugString(L"µ»¥˝µ±«∞Õ®÷™Ω· ¯\n");
+        OutputDebugString(L"Á≠âÂæÖÂΩìÂâçÈÄöÁü•ÁªìÊùü\n");
     }
 }
 
@@ -145,12 +219,12 @@ void ProcessAchievementQueue() {
     OutputDebugString(L"ProcessAchievementQueue called\n");
 
     if (g_showingNotification) {
-        OutputDebugString(L"“—æ≠”–Õ®÷™‘⁄œ‘ æ£¨Ã¯π˝\n");
+        OutputDebugString(L"Â∑≤ÁªèÊúâÈÄöÁü•Âú®ÊòæÁ§∫ÔºåË∑≥Ëøá\n");
         return;
     }
 
     std::lock_guard<std::mutex> lock(g_queueMutex);
-    OutputDebugString(L"∂”¡–¥Û–°: –Ë“™ºÏ≤È\n");
+    OutputDebugString(L"ÈòüÂàóÂ§ßÂ∞è: ÈúÄË¶ÅÊ£ÄÊü•\n");
 
     if (!g_achievementQueue.empty()) {
         g_showingNotification = true;
@@ -158,19 +232,19 @@ void ProcessAchievementQueue() {
         g_achievementQueue.pop();
 
         wchar_t debugMsg[256];
-        swprintf_s(debugMsg, L"¥”∂”¡–»°≥ˆ≥…æÕ: %s\n", adv.title.c_str());
+        swprintf_s(debugMsg, L"‰ªéÈòüÂàóÂèñÂá∫ÊàêÂ∞±: %s\n", adv.title.c_str());
         OutputDebugString(debugMsg);
 
         if (g_pAdvManager) {
-            OutputDebugString(L"µ˜”√ShowAdvancementNotification\n");
+            OutputDebugString(L"Ë∞ÉÁî®ShowAdvancementNotification\n");
             g_pAdvManager->ShowAdvancementNotification(adv);
         }
         else {
-            OutputDebugString(L"¥ÌŒÛ: g_pAdvManagerŒ™ø’£°\n");
+            OutputDebugString(L"ÈîôËØØ: g_pAdvManager‰∏∫Á©∫ÔºÅ\n");
         }
     }
     else {
-        OutputDebugString(L"∂”¡–Œ™ø’\n");
+        OutputDebugString(L"ÈòüÂàó‰∏∫Á©∫\n");
     }
 }
 
@@ -453,20 +527,20 @@ bool AdvancementManager::LoadAdvancementsFromJSON() {
     version = L"";
 
     if (GetFileAttributes(jsonFilePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
-        std::wstring errorMsg = L"’“≤ªµΩ≥…æÕ≈‰÷√Œƒº˛£°\n«Î»∑±£“‘œ¬Œƒº˛¥Ê‘⁄£∫\n" + jsonFilePath;
-        MessageBox(hMainWnd, errorMsg.c_str(), L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+        std::wstring errorMsg = L"Êâæ‰∏çÂà∞ÊàêÂ∞±ÈÖçÁΩÆÊñá‰ª∂ÔºÅ\nËØ∑Á°Æ‰øù‰ª•‰∏ãÊñá‰ª∂Â≠òÂú®Ôºö\n" + jsonFilePath;
+        MessageBox(hMainWnd, errorMsg.c_str(), L"ÈîôËØØ", MB_ICONERROR | MB_OK);
         return false;
     }
 
     std::string jsonContent = ReadFileAsUTF8(jsonFilePath);
     if (jsonContent.empty()) {
-        MessageBox(hMainWnd, L"JSONŒƒº˛Œ™ø’ªÚ∂¡»° ß∞‹£°", L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+        MessageBox(hMainWnd, L"JSONÊñá‰ª∂‰∏∫Á©∫ÊàñËØªÂèñÂ§±Ë¥•ÔºÅ", L"ÈîôËØØ", MB_ICONERROR | MB_OK);
         return false;
     }
 
     version = ExtractJSONVersion(jsonContent);
     if (version.empty()) {
-        version = L"Œ¥÷™∞Ê±æ";
+        version = L"Êú™Áü•ÁâàÊú¨";
     }
 
     std::istringstream jsonStream(jsonContent);
@@ -547,7 +621,7 @@ bool AdvancementManager::LoadAdvancementsFromJSON() {
     }
 
     if (advancements.empty()) {
-        MessageBox(hMainWnd, L"JSONΩ‚Œˆ ß∞‹ªÚ√ª”–’“µΩ≥…æÕ≈‰÷√£°", L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+        MessageBox(hMainWnd, L"JSONËß£ÊûêÂ§±Ë¥•ÊàñÊ≤°ÊúâÊâæÂà∞ÊàêÂ∞±ÈÖçÁΩÆÔºÅ", L"ÈîôËØØ", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -690,7 +764,7 @@ void AdvancementManager::TriggerAdvancement(const std::wstring& id) {
             UpdateLists();
 
             AddAchievementToQueue(adv);
-            OutputDebugString(L"≥…æÕ¥•∑¢: ");
+            OutputDebugString(L"ÊàêÂ∞±Ëß¶Âèë: ");
             OutputDebugString(adv.title.c_str());
             OutputDebugString(L"\n");
             break;
@@ -709,14 +783,14 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     wc.lpszClassName = L"AdvancementNotification";
 
     if (UnregisterClass(L"AdvancementNotification", hInst)) {
-        OutputDebugString(L"æ…¥∞ø⁄¿‡“—◊¢œ˙\n");
+        OutputDebugString(L"ÊóßÁ™óÂè£Á±ªÂ∑≤Ê≥®ÈîÄ\n");
     }
     if (RegisterClassEx(&wc)) {
-        OutputDebugString(L"¥∞ø⁄¿‡◊¢≤·≥…π¶\n");
+        OutputDebugString(L"Á™óÂè£Á±ªÊ≥®ÂÜåÊàêÂäü\n");
     } else {
         DWORD error = GetLastError();
         wchar_t debugMsg[256];
-        swprintf_s(debugMsg, L"¥∞ø⁄¿‡◊¢≤· ß∞‹£¨¥ÌŒÛ¥˙¬Î: %d\n", error);
+        swprintf_s(debugMsg, L"Á™óÂè£Á±ªÊ≥®ÂÜåÂ§±Ë¥•ÔºåÈîôËØØ‰ª£Á†Å: %d\n", error);
         OutputDebugString(debugMsg);
     }
 
@@ -746,10 +820,10 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     bool useCustomFont = (GetFileAttributes(fontPath.c_str()) != INVALID_FILE_ATTRIBUTES);
     if (useCustomFont) {
         wchar_t debugMsg[512];
-        swprintf_s(debugMsg, L"’“µΩ◊÷ÃÂŒƒº˛: %s\n", fontPath.c_str());
+        swprintf_s(debugMsg, L"ÊâæÂà∞Â≠ó‰ΩìÊñá‰ª∂: %s\n", fontPath.c_str());
         OutputDebugString(debugMsg);
     } else {
-        OutputDebugString(L"Œ¥’“µΩ◊‘∂®“Â◊÷ÃÂŒƒº˛£¨ π”√ƒ¨»œ◊÷ÃÂ\n");
+        OutputDebugString(L"Êú™ÊâæÂà∞Ëá™ÂÆö‰πâÂ≠ó‰ΩìÊñá‰ª∂Ôºå‰ΩøÁî®ÈªòËÆ§Â≠ó‰Ωì\n");
     }
 
     HWND hNotifWnd = CreateWindowEx(
@@ -764,12 +838,12 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     if (!hNotifWnd) {
         DWORD error = GetLastError();
         wchar_t errorMsg[256];
-        swprintf_s(errorMsg, L"¥¥Ω®Õ®÷™¥∞ø⁄ ß∞‹£¨¥ÌŒÛ¥˙¬Î: %d\n", error);
+        swprintf_s(errorMsg, L"ÂàõÂª∫ÈÄöÁü•Á™óÂè£Â§±Ë¥•ÔºåÈîôËØØ‰ª£Á†Å: %d\n", error);
         OutputDebugString(errorMsg);
         return;
     }
 
-    OutputDebugString(L"Õ®÷™¥∞ø⁄¥¥Ω®≥…π¶\n");
+    OutputDebugString(L"ÈÄöÁü•Á™óÂè£ÂàõÂª∫ÊàêÂäü\n");
 
     SetLayeredWindowAttributes(hNotifWnd, 0, 230, LWA_ALPHA);
 
@@ -788,7 +862,7 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     else {
         pData->pIconBitmap = BitmapFromBase64DataURI(
             L"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAE7mlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgOS4xLWMwMDIgNzkuNzhiNzYzOCwgMjAyNS8wMi8xMS0xOToxMDowOCAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczpkYz0iaHR0cDovL3B1cmwub3JnL2RjL2VsZW1lbnRzLzEuMS8iIHhtbG5zOnBob3Rvc2hvcD0iaHR0cDovL25zLmFkb2JlLmNvbS9waG90b3Nob3AvMS4wLyIgeG1sbnM6eG1wTU09Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8iIHhtbG5zOnN0RXZ0PSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvc1R5cGUvUmVzb3VyY2VFdmVudCMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIDI2LjUgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wNi0xNFQxNDo0NDo1OSswODowMCIgeG1wOk1vZGlmeURhdGU9IjIwMjYtMDYtMTRUMTU6MDQ6MDArMDg6MDAiIHhtcDpNZXRhZGF0YURhdGU9IjIwMjYtMDYtMTRUMTU6MDQ6MDArMDg6MDAiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjYyOWNhNTU4LTFmZjctODE0ZS04YTA1LWM2YTgwNzY3ZTE5MyIgeG1wTU06RG9jdW1lbnRJRD0ieG1wLmRpZDo2MjljYTU1OC0xZmY3LTgxNGUtOGEwNS1jNmE4MDc2N2UxOTMiIHhtcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDo2MjljYTU1OC0xZmY3LTgxNGUtOGEwNS1jNmE4MDc2N2UxOTMiPiA8eG1wTU06SGlzdG9yeT4gPHJkZjpTZXE+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjcmVhdGVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOjYyOWNhNTU4LTFmZjctODE0ZS04YTA1LWM2YTgwNzY3ZTE5MyIgc3RFdnQ6d2hlbj0iMjAyNi0wNi0xNFQxNDo0NDo1OSswODowMCIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIDI2LjUgKFdpbmRvd3MpIi8+IDwvcmRmOlNlcT4gPC94bXBNTTpIaXN0b3J5PiA8L3JkZjpEZXNjcmlwdGlvbj4gPC9yZGY6UkRGPiA8L3g6eG1wbWV0YT4gPD94cGFja2V0IGVuZD0iciI/PlHbY14AAAKmSURBVHic7ZtNboMwFISfQ1acoYtw/0M1i56gi66w6MpVQ8Ce92un6kiVUArPMPPZ/Dpt20bRyjnfiIimr+s7EVGe14WIaJqme/S+XKIb3B/87+Xyv0iFG0D0ePC13yIUagCScDQF4QTUku5BQZgBnGQjKQglAEk4moIQAySJRlEQRgAn2UgK3A2oJZnndSkXQdxtrRRCgCTRKApcDWilf7TMqWEhdwKq5/1puteu/yMocDMATb/2G1JLK1cCWukfLXNqWOjqURRJf79OSuktz+tydsA555vH7bKLAUT8q748r0tK6e1svVoX0ci8C6B9f2/Q/uEIt7ZULmMA2vf32rbtQ1JTI1MDuCO/ZF1rCswJkKaPrONBgZkBVukj21hSYEqANn1kXWsKTAywTh/Z1ooCMwKs0ke2saRAbYBX+kgNCwpMCLBOH9nWigKVAd7pI7W0FKgJ8EofqWFBgdiAqPSRmhoKVAR4p4/U0lIgMiA6faS2lAIxAVHpIzU1FLAN6JU+0oaEAhEB0ekjtaUUsAzonT7SFpcCNgG90kfakFAAGzBK+kibHApYBPROH2mLSwFkwGjpI22jFMAEWKe/33mukVYUNA3wSL/sfPk+QPOhpJYC6M2QR9+3ulM8O0j0bVKVgFH7/l4aCppdYJSRX7IPyFhwasCrpF8kpaBKwOjpF2koODTg1dIvklBwehaISP9opzRnFckZ4YmAsCe9v+YNlL9W+1BdJgWHXcA7/aNJE612EUnGggcDIvu+58dPHAqeCHiVkf9MXAp+DBhh5O/xNumBgMj0z+4Go98mXYji07e8G6wJoeDnOmCk5/xW9ZHrgssIfd9TLQquRO1TUo8Jjd4qFFQfiPSazBiptH1S/OThgdRl6uxI+jfgL4z0UuV5Xb4BpNcoyLX8aZgAAAAASUVORK5CYII="
-        );   //√ª”–”––ßµƒicon_base64æÕ”√À¸ °¸
+        );   //Ê≤°ÊúâÊúâÊïàÁöÑicon_base64Â∞±Áî®ÂÆÉ ‚Üë
     }
 
     if (useCustomFont) {
@@ -814,41 +888,41 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
         std::wstring soundFile = exeDir + L"\\bin\\adv_sound.wav";
 
         wchar_t debugMsg[512];
-        swprintf_s(debugMsg, L"ºÏ≤È“Ù–ßŒƒº˛: %s\n", soundFile.c_str());
+        swprintf_s(debugMsg, L"Ê£ÄÊü•Èü≥ÊïàÊñá‰ª∂: %s\n", soundFile.c_str());
         OutputDebugString(debugMsg);
 
         if (GetFileAttributes(soundFile.c_str()) == INVALID_FILE_ATTRIBUTES) {
             soundFile = exeDir + L"\\bin\\adv_sound.mp3";
-            swprintf_s(debugMsg, L"WAVŒƒº˛≤ª¥Ê‘⁄£¨ºÏ≤ÈMP3: %s\n", soundFile.c_str());
+            swprintf_s(debugMsg, L"WAVÊñá‰ª∂‰∏çÂ≠òÂú®ÔºåÊ£ÄÊü•MP3: %s\n", soundFile.c_str());
             OutputDebugString(debugMsg);
             if (GetFileAttributes(soundFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                OutputDebugString(L"≤•∑≈MP3“Ù–ß\n");
+                OutputDebugString(L"Êí≠ÊîæMP3Èü≥Êïà\n");
                 PlayAudioFile(soundFile);
             }
             else {
                 soundFile = exeDir + L"\\bin\\adv_soud.mp3";
                 if (GetFileAttributes(soundFile.c_str()) != INVALID_FILE_ATTRIBUTES) {
-                    OutputDebugString(L"≤•∑≈MP3“Ù–ß(æ…Œƒº˛√˚)\n");
+                    OutputDebugString(L"Êí≠ÊîæMP3Èü≥Êïà(ÊóßÊñá‰ª∂Âêç)\n");
                     PlayAudioFile(soundFile);
                 }
                 else {
-                    OutputDebugString(L"“Ù–ßŒƒº˛≤ª¥Ê‘⁄£°\n");
+                    OutputDebugString(L"Èü≥ÊïàÊñá‰ª∂‰∏çÂ≠òÂú®ÔºÅ\n");
                 }
             }
         }
         else {
-            OutputDebugString(L"≤•∑≈WAV“Ù–ß\n");
+            OutputDebugString(L"Êí≠ÊîæWAVÈü≥Êïà\n");
             PlaySound(soundFile.c_str(), NULL, SND_FILENAME | SND_ASYNC | SND_NODEFAULT);
         }
     }
     else {
-        OutputDebugString(L"“Ù–ß“—Ω˚”√\n");
+        OutputDebugString(L"Èü≥ÊïàÂ∑≤Á¶ÅÁî®\n");
     }
 }
 
 void AdvancementManager::Initialize() {
     if (!LoadAdvancementsFromJSON()) {
-        MessageBox(hMainWnd, L"º”‘ÿ≥…æÕ≈‰÷√ ß∞‹£¨≥Ã–ÚΩ´ÕÀ≥ˆ£°", L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+        MessageBox(hMainWnd, L"Âä†ËΩΩÊàêÂ∞±ÈÖçÁΩÆÂ§±Ë¥•ÔºåÁ®ãÂ∫èÂ∞ÜÈÄÄÂá∫ÔºÅ", L"ÈîôËØØ", MB_ICONERROR | MB_OK);
         PostQuitMessage(0);
         return;
     }
@@ -870,9 +944,9 @@ void AdvancementManager::Initialize() {
         10, 60 + listHeight + 10, listWidth, listHeight,
         hMainWnd, (HMENU)ID_LIST_UNCOMPLETED, hInst, NULL);
 
-    HFONT hFont = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    HFONT hFont = CreateFont(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Œ¢»Ì—≈∫⁄");
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"ÂæÆËΩØÈõÖÈªë");
 
     if (hFont) {
         SendMessage(hListCompleted, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -950,7 +1024,7 @@ void AdvancementManager::UpdateLists() {
             item = adv.title + L" - " + adv.description;
         }
 
-        std::wstring triggerInfo = L"    ¥•∑¢∑Ω Ω: " + adv.triggerDescription;
+        std::wstring triggerInfo = L"    Ëß¶ÂèëÊñπÂºè: " + adv.triggerDescription;
 
         SIZE size = {};
         GetTextExtentPoint32(hdc, item.c_str(), (int)item.length(), &size);
@@ -1033,7 +1107,7 @@ void ShowDownloadWindow(HWND hParent) {
     g_hDownloadWnd = CreateWindowEx(
         WS_EX_DLGMODALFRAME,
         L"DownloadProgressWindow",
-        L"œ¬‘ÿ≥…æÕ¡–±Ì",
+        L"‰∏ãËΩΩÊàêÂ∞±ÂàóË°®",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
         x, y, 400, 180,
         hParent, NULL, hInst, NULL
@@ -1044,12 +1118,12 @@ void ShowDownloadWindow(HWND hParent) {
         20, 50, 360, 25,
         g_hDownloadWnd, NULL, hInst, NULL);
 
-    g_hStatusText = CreateWindowEx(0, L"STATIC", L"’˝‘⁄¡¨Ω”µΩ∑˛ŒÒ∆˜...",
+    g_hStatusText = CreateWindowEx(0, L"STATIC", L"Ê≠£Âú®ËøûÊé•Âà∞ÊúçÂä°Âô®...",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
         20, 85, 360, 20,
         g_hDownloadWnd, NULL, hInst, NULL);
 
-    g_hCancelButton = CreateWindowEx(0, L"BUTTON", L"»°œ˚",
+    g_hCancelButton = CreateWindowEx(0, L"BUTTON", L"ÂèñÊ∂à",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
         300, 115, 80, 25,
         g_hDownloadWnd, (HMENU)IDCANCEL, hInst, NULL);
@@ -1059,7 +1133,7 @@ void ShowDownloadWindow(HWND hParent) {
 
     HFONT hFont = CreateFont(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Œ¢»Ì—≈∫⁄");
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"ÂæÆËΩØÈõÖÈªë");
     if (hFont) {
         SendMessage(g_hStatusText, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessage(g_hCancelButton, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -1090,7 +1164,7 @@ void UpdateDownloadProgress(int progress, const std::wstring& status) {
 
 bool DownloadAdvancementJson(HWND hWnd) {
     if (g_bDownloading) {
-        MessageBox(hWnd, L"µ±«∞’˝‘⁄œ¬‘ÿ£¨«Î…‘∫Ú...", L"Ã· æ", MB_ICONINFORMATION | MB_OK);
+        MessageBox(hWnd, L"ÂΩìÂâçÊ≠£Âú®‰∏ãËΩΩÔºåËØ∑Á®çÂÄô...", L"ÊèêÁ§∫", MB_ICONINFORMATION | MB_OK);
         return false;
     }
 
@@ -1137,32 +1211,32 @@ bool DownloadAdvancementJson(HWND hWnd) {
             CreateDirectory(binDir.c_str(), NULL);
         }
 
-        UpdateDownloadProgress(10, L"’˝‘⁄≥ı ºªØÕ¯¬Á¡¨Ω”...");
+        UpdateDownloadProgress(10, L"Ê≠£Âú®ÂàùÂßãÂåñÁΩëÁªúËøûÊé•...");
 
         hInternet = InternetOpen(L"MCAdvancementsOnWin", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
         if (!hInternet) {
-            errorMessage = L"≥ı ºªØÕ¯¬Á¡¨Ω” ß∞‹£°";
+            errorMessage = L"ÂàùÂßãÂåñÁΩëÁªúËøûÊé•Â§±Ë¥•ÔºÅ";
             goto cleanup;
         }
 
-        UpdateDownloadProgress(30, L"’˝‘⁄¡¨Ω”µΩ∑˛ŒÒ∆˜...");
+        UpdateDownloadProgress(30, L"Ê≠£Âú®ËøûÊé•Âà∞ÊúçÂä°Âô®...");
         hUrl = InternetOpenUrl(hInternet,
             L"https://raw.githubusercontent.com/MoyeeLZX/MCAdvancementsOnWin/refs/heads/main/repo/adv.json",
             NULL, 0, INTERNET_FLAG_RELOAD, 0);
 
         if (!hUrl) {
-            errorMessage = L"Œﬁ∑®¡¨Ω”µΩ∑˛ŒÒ∆˜£°";
+            errorMessage = L"Êó†Ê≥ïËøûÊé•Âà∞ÊúçÂä°Âô®ÔºÅ";
             goto cleanup;
         }
 
-        UpdateDownloadProgress(50, L"’˝‘⁄¥¥Ω®¡Ÿ ±Œƒº˛...");
+        UpdateDownloadProgress(50, L"Ê≠£Âú®ÂàõÂª∫‰∏¥Êó∂Êñá‰ª∂...");
         hFile = CreateFile(tempPath.c_str(), GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
         if (hFile == INVALID_HANDLE_VALUE) {
-            errorMessage = L"¥¥Ω®¡Ÿ ±Œƒº˛ ß∞‹£°";
+            errorMessage = L"ÂàõÂª∫‰∏¥Êó∂Êñá‰ª∂Â§±Ë¥•ÔºÅ";
             goto cleanup;
         }
 
-        UpdateDownloadProgress(70, L"’˝‘⁄œ¬‘ÿ ˝æ›...");
+        UpdateDownloadProgress(70, L"Ê≠£Âú®‰∏ãËΩΩÊï∞ÊçÆ...");
         success = TRUE;
         totalBytes = 0;
         fileSize = 0;
@@ -1174,7 +1248,7 @@ bool DownloadAdvancementJson(HWND hWnd) {
         while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
             if (g_bDownloadCanceled) {
                 success = FALSE;
-                errorMessage = L"œ¬‘ÿ“—±ª»°œ˚";
+                errorMessage = L"‰∏ãËΩΩÂ∑≤Ë¢´ÂèñÊ∂à";
                 break;
             }
 
@@ -1187,10 +1261,10 @@ bool DownloadAdvancementJson(HWND hWnd) {
 
             if (fileSize > 0) {
                 int progress = 70 + (int)((float)totalBytes / fileSize * 25.0f);
-                UpdateDownloadProgress(progress, L"’˝‘⁄œ¬‘ÿ ˝æ›...");
+                UpdateDownloadProgress(progress, L"Ê≠£Âú®‰∏ãËΩΩÊï∞ÊçÆ...");
             }
             else {
-                UpdateDownloadProgress(85, L"’˝‘⁄œ¬‘ÿ ˝æ›...");
+                UpdateDownloadProgress(85, L"Ê≠£Âú®‰∏ãËΩΩÊï∞ÊçÆ...");
             }
         }
 
@@ -1203,38 +1277,38 @@ bool DownloadAdvancementJson(HWND hWnd) {
 
         if (g_bDownloadCanceled) {
             DeleteFile(tempPath.c_str());
-            std::wstring* pMessage = new std::wstring(L"œ¬‘ÿ“—±ª»°œ˚");
+            std::wstring* pMessage = new std::wstring(L"‰∏ãËΩΩÂ∑≤Ë¢´ÂèñÊ∂à");
             PostMessage(hWnd, WM_USER + 104, 0, (LPARAM)pMessage);
             return;
         }
 
         if (!success || totalBytes == 0) {
             DeleteFile(tempPath.c_str());
-            errorMessage = L"œ¬‘ÿ ß∞‹£°";
+            errorMessage = L"‰∏ãËΩΩÂ§±Ë¥•ÔºÅ";
             goto cleanup;
         }
 
-        UpdateDownloadProgress(95, L"’˝‘⁄—È÷§œ¬‘ÿµƒŒƒº˛...");
+        UpdateDownloadProgress(95, L"Ê≠£Âú®È™åËØÅ‰∏ãËΩΩÁöÑÊñá‰ª∂...");
 
         downloadedContent = ReadFileAsUTF8(tempPath);
         if (downloadedContent.empty()) {
             DeleteFile(tempPath.c_str());
-            errorMessage = L"œ¬‘ÿµƒŒƒº˛Œ™ø’£°";
+            errorMessage = L"‰∏ãËΩΩÁöÑÊñá‰ª∂‰∏∫Á©∫ÔºÅ";
             goto cleanup;
         }
 
         downloadedVersion = ExtractJSONVersion(downloadedContent);
         if (downloadedVersion.empty()) {
-            downloadedVersion = L"Œ¥÷™∞Ê±æ";
+            downloadedVersion = L"Êú™Áü•ÁâàÊú¨";
         }
 
         if (!IsJSONFileValid(tempPath)) {
             DeleteFile(tempPath.c_str());
-            errorMessage = L"œ¬‘ÿµƒŒƒº˛∏Ò Ω≤ª’˝»∑£°";
+            errorMessage = L"‰∏ãËΩΩÁöÑÊñá‰ª∂Ê†ºÂºè‰∏çÊ≠£Á°ÆÔºÅ";
             goto cleanup;
         }
 
-        UpdateDownloadProgress(100, L"œ¬‘ÿÕÍ≥…£¨’˝‘⁄¥¶¿Ì...");
+        UpdateDownloadProgress(100, L"‰∏ãËΩΩÂÆåÊàêÔºåÊ≠£Âú®Â§ÑÁêÜ...");
 
         if (IsNewerVersion(currentVersion, downloadedVersion)) {
             std::wstring* pData = new std::wstring[4];
@@ -1249,13 +1323,13 @@ bool DownloadAdvancementJson(HWND hWnd) {
         else {
             DeleteFile(tempPath.c_str());
 
-            std::wstring* pMessage = new std::wstring(L"µ±«∞“— «◊Ó–¬∞Ê±æ£°\n\n");
-            *pMessage += L"µ±«∞∞Ê±æ: " + (currentVersion.empty() ? L"Œ¥÷™∞Ê±æ" : currentVersion) + L"\n";
+            std::wstring* pMessage = new std::wstring(L"ÂΩìÂâçÂ∑≤ÊòØÊúÄÊñ∞ÁâàÊú¨ÔºÅ\n\n");
+            *pMessage += L"ÂΩìÂâçÁâàÊú¨: " + (currentVersion.empty() ? L"Êú™Áü•ÁâàÊú¨" : currentVersion) + L"\n";
             if (currentVersion == downloadedVersion) {
-                *pMessage += L"∑˛ŒÒ∆˜∞Ê±æ: " + downloadedVersion + L" (”Îµ±«∞∞Ê±æœ‡Õ¨)\n";
+                *pMessage += L"ÊúçÂä°Âô®ÁâàÊú¨: " + downloadedVersion + L" (‰∏éÂΩìÂâçÁâàÊú¨Áõ∏Âêå)\n";
             }
             else {
-                *pMessage += L"∑˛ŒÒ∆˜∞Ê±æ: " + downloadedVersion + L" (±»µ±«∞∞Ê±ææ…)\n";
+                *pMessage += L"ÊúçÂä°Âô®ÁâàÊú¨: " + downloadedVersion + L" (ÊØîÂΩìÂâçÁâàÊú¨Êóß)\n";
             }
 
             PostMessage(hWnd, WM_USER + 102, 0, (LPARAM)pMessage);
@@ -1315,10 +1389,10 @@ LRESULT CALLBACK DownloadWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         RECT rc = { 20, 20, 380, 40 };
         HFONT hFont = CreateFont(16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Œ¢»Ì—≈∫⁄");
+            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"ÂæÆËΩØÈõÖÈªë");
         HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
         SetBkMode(hdc, TRANSPARENT);
-        DrawText(hdc, L"’˝‘⁄œ¬‘ÿ≥…æÕ¡–±Ì...", -1, &rc, DT_LEFT);
+        DrawText(hdc, L"Ê≠£Âú®‰∏ãËΩΩÊàêÂ∞±ÂàóË°®...", -1, &rc, DT_LEFT);
         SelectObject(hdc, hOldFont);
         DeleteObject(hFont);
 
@@ -1359,20 +1433,20 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         if (pData) {
             if (pData->pAdv) {
                 wchar_t debugMsg[512];
-                swprintf_s(debugMsg, L"WM_CREATE: ≥…æÕ±ÍÃ‚=%s\n", pData->pAdv->title.c_str());
+                swprintf_s(debugMsg, L"WM_CREATE: ÊàêÂ∞±Ê†áÈ¢ò=%s\n", pData->pAdv->title.c_str());
                 OutputDebugString(debugMsg);
             }
 
             if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
                 int result = AddFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
                 if (result > 0) {
-                    OutputDebugString(L"◊‘∂®“Â◊÷ÃÂº”‘ÿ≥…π¶\n");
+                    OutputDebugString(L"Ëá™ÂÆö‰πâÂ≠ó‰ΩìÂä†ËΩΩÊàêÂäü\n");
                     wchar_t debugMsg[256];
-                    swprintf_s(debugMsg, L"◊÷ÃÂŒƒº˛: %s, º”‘ÿ ˝¡ø: %d\n", pData->pFontPath->c_str(), result);
+                    swprintf_s(debugMsg, L"Â≠ó‰ΩìÊñá‰ª∂: %s, Âä†ËΩΩÊï∞Èáè: %d\n", pData->pFontPath->c_str(), result);
                     OutputDebugString(debugMsg);
                     SetWindowLongPtr(hWnd, GWLP_USERDATA + 2, 1);
                 } else {
-                    OutputDebugString(L"◊‘∂®“Â◊÷ÃÂº”‘ÿ ß∞‹£¨ π”√ƒ¨»œ◊÷ÃÂ\n");
+                    OutputDebugString(L"Ëá™ÂÆö‰πâÂ≠ó‰ΩìÂä†ËΩΩÂ§±Ë¥•Ôºå‰ΩøÁî®ÈªòËÆ§Â≠ó‰Ωì\n");
                 }
             }
         }
@@ -1442,7 +1516,7 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                 if (pData) {
                     if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
                         RemoveFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
-                        OutputDebugString(L"◊‘∂®“Â◊÷ÃÂ“—–∂‘ÿ\n");
+                        OutputDebugString(L"Ëá™ÂÆö‰πâÂ≠ó‰ΩìÂ∑≤Âç∏ËΩΩ\n");
                     }
 
                     if (pData->pIconBitmap) {
@@ -1514,7 +1588,7 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
             SetBkMode(hdcMem, TRANSPARENT);
 
             Gdiplus::PrivateFontCollection privateFontCollection;
-            std::wstring actualFontName = L"Œ¢»Ì—≈∫⁄";
+            std::wstring actualFontName = L"ÂæÆËΩØÈõÖÈªë";
 
             if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
                 Gdiplus::Status status = privateFontCollection.AddFontFile(pData->pFontPath->c_str());
@@ -1527,11 +1601,11 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
                         fontFamily.GetFamilyName(familyName, LANG_NEUTRAL);
                         actualFontName = familyName;
                         wchar_t debugMsg[512];
-                        swprintf_s(debugMsg, L" π”√◊‘∂®“Â◊÷ÃÂ: %s\n", actualFontName.c_str());
+                        swprintf_s(debugMsg, L"‰ΩøÁî®Ëá™ÂÆö‰πâÂ≠ó‰Ωì: %s\n", actualFontName.c_str());
                         OutputDebugString(debugMsg);
                     }
                 } else {
-                    OutputDebugString(L"º”‘ÿ◊÷ÃÂŒƒº˛ ß∞‹\n");
+                    OutputDebugString(L"Âä†ËΩΩÂ≠ó‰ΩìÊñá‰ª∂Â§±Ë¥•\n");
                 }
             }
 
@@ -1566,7 +1640,7 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
             RECT rcTitle = { textLeft, windowHeight * 8 / 100, windowWidth - padding, windowHeight * 35 / 100 };
             SetTextColor(hdcMem, RGB(255, 215, 0));
             HFONT hOldFont = (HFONT)SelectObject(hdcMem, hBaseFont);
-            DrawText(hdcMem, L"ªÒµ√≥…æÕ", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+            DrawText(hdcMem, L"Ëé∑ÂæóÊàêÂ∞±", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
             RECT rcAdv = { textLeft, windowHeight * 40 / 100, windowWidth - padding, windowHeight * 90 / 100 };
             std::wstring displayTitle = pData->pAdv->title;
@@ -1598,7 +1672,7 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         if (pData) {
             if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
                 RemoveFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
-                OutputDebugString(L"WM_DESTROY: ◊‘∂®“Â◊÷ÃÂ“—–∂‘ÿ\n");
+                OutputDebugString(L"WM_DESTROY: Ëá™ÂÆö‰πâÂ≠ó‰ΩìÂ∑≤Âç∏ËΩΩ\n");
             }
 
             if (pData->pIconBitmap) {
@@ -1644,18 +1718,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     static int minHeight = 400;
 
     switch (message) {
+    if (message == g_uTaskbarRestart && g_uTaskbarRestart != 0) {
+        AddTrayIcon(hWnd);
+        break;
+    }
+
     case WM_CREATE: {
         g_pSettingsManager = new (std::nothrow) SettingsManager();
         if (g_pSettingsManager) {
             g_pSettingsManager->LoadSettings();
         }
         else {
-            MessageBox(hWnd, L"Œﬁ∑®≥ı ºªØ…Ë÷√π‹¿Ì∆˜£°≥Ã–ÚΩ´ÕÀ≥ˆ°£", L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+            MessageBox(hWnd, L"Êó†Ê≥ïÂàùÂßãÂåñËÆæÁΩÆÁÆ°ÁêÜÂô®ÔºÅÁ®ãÂ∫èÂ∞ÜÈÄÄÂá∫„ÄÇ", L"ÈîôËØØ", MB_ICONERROR | MB_OK);
             PostQuitMessage(1);
             break;
         }
 
         g_hMainWnd = hWnd;
+
+        g_uTaskbarRestart = RegisterWindowMessage(L"TaskbarCreated");
 
         g_pAdvManager = new (std::nothrow) AdvancementManager(hWnd);
         if (g_pAdvManager) {
@@ -1664,7 +1745,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_pSettingsManager->UpdateAllMenuItems(hWnd);
         }
         else {
-            MessageBox(hWnd, L"Œﬁ∑®¥¥Ω®≥…æÕπ‹¿Ì∆˜£°≥Ã–ÚΩ´ÕÀ≥ˆ°£", L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+            MessageBox(hWnd, L"Êó†Ê≥ïÂàõÂª∫ÊàêÂ∞±ÁÆ°ÁêÜÂô®ÔºÅÁ®ãÂ∫èÂ∞ÜÈÄÄÂá∫„ÄÇ", L"ÈîôËØØ", MB_ICONERROR | MB_OK);
             PostQuitMessage(1);
             break;
         }
@@ -1711,10 +1792,20 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 }
             }
         }
+        else if (wmId == IDM_SETTINGS_RELOAD) {
+            if (g_pSettingsManager) {
+                g_pSettingsManager->LoadSettings();
+                g_pSettingsManager->UpdateAllMenuItems(hWnd);
+            }
+            if (g_pAdvManager) {
+                g_pAdvManager->UpdateLists();
+            }
+            MessageBox(hWnd, L"ËÆæÁΩÆÂ∑≤‰ªé setting.config ÈáçÊñ∞Âä†ËΩΩ„ÄÇ", L"ÈáçÊñ∞Âä†ËΩΩËÆæÁΩÆ", MB_OK | MB_ICONINFORMATION);
+        }
         else if (wmId == IDM_SETTINGS_CLEAR_SAVE) {
             int result = MessageBox(hWnd,
-                L"ƒ˙»∑∂®“™«Âø’¥Êµµ¬£ø\n’‚Ω´…æ≥˝À˘”–“—ÕÍ≥…µƒ≥…æÕº«¬º£¨…æ≥˝∫ÛŒﬁ∑®ª÷∏¥°£",
-                L"»∑»œ«Âø’¥Êµµ",
+                L"ÊÇ®Á°ÆÂÆöË¶ÅÊ∏ÖÁ©∫Â≠òÊ°£ÂêóÔºü\nËøôÂ∞ÜÂà†Èô§ÊâÄÊúâÂ∑≤ÂÆåÊàêÁöÑÊàêÂ∞±ËÆ∞ÂΩïÔºåÂà†Èô§ÂêéÊó†Ê≥ïÊÅ¢Â§ç„ÄÇ",
+                L"Á°ÆËÆ§Ê∏ÖÁ©∫Â≠òÊ°£",
                 MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
 
             if (result == IDYES) {
@@ -1732,10 +1823,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         RestartApplication();
                     }
                     else {
-                        MessageBox(hWnd, L"…æ≥˝¥ÊµµŒƒº˛ ß∞‹£°", L"¥ÌŒÛ", MB_ICONERROR | MB_OK);
+                        MessageBox(hWnd, L"Âà†Èô§Â≠òÊ°£Êñá‰ª∂Â§±Ë¥•ÔºÅ", L"ÈîôËØØ", MB_ICONERROR | MB_OK);
                     }
                 }
             }
+        }
+        else if (wmId == ID_TRAY_SHOW) {
+            if (IsWindowVisible(hWnd)) {
+                ShowWindow(hWnd, SW_HIDE);
+            }
+            else {
+                ShowWindow(hWnd, SW_RESTORE);
+                SetForegroundWindow(hWnd);
+            }
+        }
+        else if (wmId == ID_TRAY_SOUND) {
+            if (g_pSettingsManager) {
+                bool currentState = g_pSettingsManager->IsSoundEnabled();
+                g_pSettingsManager->SetSoundEnabled(!currentState);
+                g_pSettingsManager->SaveSettings();
+                g_pSettingsManager->UpdateAllMenuItems(hWnd);
+            }
+        }
+        else if (wmId == ID_TRAY_ABOUT) {
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_ABOUTBOX), hWnd, about);
+        }
+        else if (wmId == ID_TRAY_EXIT) {
+            DestroyWindow(hWnd);
         }
         break;
     }
@@ -1755,7 +1869,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         break;
 
+    case WM_TRAYICON: {
+        wchar_t dbg[128];
+        swprintf_s(dbg, L"[Tray] WM_TRAYICON Êî∂Âà∞, lParam=0x%X\n", (unsigned int)lParam);
+        OutputDebugString(dbg);
+        if (lParam == WM_RBUTTONUP || lParam == WM_RBUTTONDOWN || lParam == WM_CONTEXTMENU) {
+            ShowTrayMenu(hWnd);
+        }
+        else if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+            ShowWindow(hWnd, SW_RESTORE);
+            SetForegroundWindow(hWnd);
+        }
+        break;
+    }
+
     case WM_SIZE:
+        if (wParam == SIZE_MINIMIZED) {
+            ShowWindow(hWnd, SW_HIDE);
+            return 0;
+        }
         if (g_pAdvManager) {
             RECT rc;
             GetClientRect(hWnd, &rc);
@@ -1764,14 +1896,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (rc.bottom < minHeight) rc.bottom = minHeight;
 
             int listWidth = rc.right - 20;
-            int listHeight = (rc.bottom - 100) / 2 - 10;
+            int listHeight = (rc.bottom - 110) / 2 - 10;
 
             HWND hList1 = GetDlgItem(hWnd, ID_LIST_COMPLETED);
             HWND hList2 = GetDlgItem(hWnd, ID_LIST_UNCOMPLETED);
 
             if (hList1 && hList2) {
-                MoveWindow(hList1, 10, 50, listWidth, listHeight, TRUE);
-                MoveWindow(hList2, 10, 60 + listHeight + 10, listWidth, listHeight, TRUE);
+                MoveWindow(hList1, 10, 56, listWidth, listHeight, TRUE);
+                MoveWindow(hList2, 10, 72 + listHeight + 18, listWidth, listHeight, TRUE);
             }
         }
         break;
@@ -1788,18 +1920,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             currentVersion = g_pAdvManager->GetVersion();
         }
 
-        std::wstring message = L"∑¢œ÷–¬∞Ê±æµƒ≥…æÕ¡–±Ì£°\n\n";
-        message += L"µ±«∞∞Ê±æ: " + (currentVersion.empty() ? L"Œ¥÷™∞Ê±æ" : currentVersion) + L"\n";
-        message += L"◊Ó–¬∞Ê±æ: " + downloadedVersion + L"\n\n";
-        message += L" «∑Ò∏¸–¬µΩ◊Ó–¬∞Ê±æ£ø";
+        std::wstring message = L"ÂèëÁé∞Êñ∞ÁâàÊú¨ÁöÑÊàêÂ∞±ÂàóË°®ÔºÅ\n\n";
+        message += L"ÂΩìÂâçÁâàÊú¨: " + (currentVersion.empty() ? L"Êú™Áü•ÁâàÊú¨" : currentVersion) + L"\n";
+        message += L"ÊúÄÊñ∞ÁâàÊú¨: " + downloadedVersion + L"\n\n";
+        message += L"ÊòØÂê¶Êõ¥Êñ∞Âà∞ÊúÄÊñ∞ÁâàÊú¨Ôºü";
 
-        int result = MessageBox(hWnd, message.c_str(), L"∑¢œ÷–¬∞Ê±æ", MB_YESNO | MB_ICONQUESTION | MB_APPLMODAL);
+        int result = MessageBox(hWnd, message.c_str(), L"ÂèëÁé∞Êñ∞ÁâàÊú¨", MB_YESNO | MB_ICONQUESTION | MB_APPLMODAL);
 
         if (result == IDYES) {
             bool hadOriginalFile = false;
             if (GetFileAttributes(jsonPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
                 if (MoveFile(jsonPath.c_str(), backupPath.c_str()) == FALSE) {
-                    MessageBox(hWnd, L"±∏∑›æ…Œƒº˛ ß∞‹£°", L"¥ÌŒÛ", MB_ICONERROR | MB_OK | MB_APPLMODAL);
+                    MessageBox(hWnd, L"Â§á‰ªΩÊóßÊñá‰ª∂Â§±Ë¥•ÔºÅ", L"ÈîôËØØ", MB_ICONERROR | MB_OK | MB_APPLMODAL);
                     DeleteFile(tempPath.c_str());
                 }
                 else {
@@ -1812,18 +1944,18 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                     DeleteFile(backupPath.c_str());
                 }
 
-                std::wstring successMessage = L"≥…æÕ¡–±Ì∏¸–¬≥…π¶£°\n\n";
-                successMessage += L"–¬∞Ê±æ: " + downloadedVersion + L"\n\n";
-                successMessage += L"–Ë“™÷ÿ∆Ù≥Ã–Ú“‘º”‘ÿ–¬µƒ≥…æÕ¡–±Ì°£\n «∑Ò¡¢º¥÷ÿ∆Ù£ø";
+                std::wstring successMessage = L"ÊàêÂ∞±ÂàóË°®Êõ¥Êñ∞ÊàêÂäüÔºÅ\n\n";
+                successMessage += L"Êñ∞ÁâàÊú¨: " + downloadedVersion + L"\n\n";
+                successMessage += L"ÈúÄË¶ÅÈáçÂêØÁ®ãÂ∫è‰ª•Âä†ËΩΩÊñ∞ÁöÑÊàêÂ∞±ÂàóË°®„ÄÇ\nÊòØÂê¶Á´ãÂç≥ÈáçÂêØÔºü";
 
-                int restartResult = MessageBox(hWnd, successMessage.c_str(), L"∏¸–¬≥…π¶", MB_YESNO | MB_ICONINFORMATION | MB_APPLMODAL);
+                int restartResult = MessageBox(hWnd, successMessage.c_str(), L"Êõ¥Êñ∞ÊàêÂäü", MB_YESNO | MB_ICONINFORMATION | MB_APPLMODAL);
 
                 if (restartResult == IDYES) {
                     RestartApplication();
                 }
             }
             else {
-                MessageBox(hWnd, L"∏¸–¬Œƒº˛ ß∞‹£°", L"¥ÌŒÛ", MB_ICONERROR | MB_OK | MB_APPLMODAL);
+                MessageBox(hWnd, L"Êõ¥Êñ∞Êñá‰ª∂Â§±Ë¥•ÔºÅ", L"ÈîôËØØ", MB_ICONERROR | MB_OK | MB_APPLMODAL);
                 if (hadOriginalFile && GetFileAttributes(backupPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
                     MoveFile(backupPath.c_str(), jsonPath.c_str());
                 }
@@ -1832,7 +1964,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         else {
             DeleteFile(tempPath.c_str());
-            MessageBox(hWnd, L"“—»°œ˚∏¸–¬°£", L"»°œ˚∏¸–¬", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
+            MessageBox(hWnd, L"Â∑≤ÂèñÊ∂àÊõ¥Êñ∞„ÄÇ", L"ÂèñÊ∂àÊõ¥Êñ∞", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
         }
 
         delete[] pData;
@@ -1847,7 +1979,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_USER + 102: {
         std::wstring* pMessage = (std::wstring*)lParam;
-        MessageBox(hWnd, pMessage->c_str(), L"“— «◊Ó–¬∞Ê±æ", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
+        MessageBox(hWnd, pMessage->c_str(), L"Â∑≤ÊòØÊúÄÊñ∞ÁâàÊú¨", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
         delete pMessage;
 
         CloseDownloadWindow();
@@ -1860,7 +1992,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_USER + 103: {
         std::wstring* pErrorMessage = (std::wstring*)lParam;
-        MessageBox(hWnd, pErrorMessage->c_str(), L"œ¬‘ÿ¥ÌŒÛ", MB_ICONERROR | MB_OK | MB_APPLMODAL);
+        MessageBox(hWnd, pErrorMessage->c_str(), L"‰∏ãËΩΩÈîôËØØ", MB_ICONERROR | MB_OK | MB_APPLMODAL);
         delete pErrorMessage;
 
         CloseDownloadWindow();
@@ -1873,7 +2005,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_USER + 104: {
         std::wstring* pMessage = (std::wstring*)lParam;
-        MessageBox(hWnd, pMessage->c_str(), L"œ¬‘ÿ»°œ˚", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
+        MessageBox(hWnd, pMessage->c_str(), L"‰∏ãËΩΩÂèñÊ∂à", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
         delete pMessage;
 
         CloseDownloadWindow();
@@ -1886,7 +2018,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_USER + 105: {
-        OutputDebugString(L" ’µΩWM_USER + 105œ˚œ¢\n");
+        OutputDebugString(L"Êî∂Âà∞WM_USER + 105Ê∂àÊÅØ\n");
         ShowNextAchievement(hWnd);
         break;
     }
@@ -1895,42 +2027,64 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
 
-        HFONT hOldFont = (HFONT)SelectObject(hdc, GetStockObject(DEFAULT_GUI_FONT));
+        HFONT hLabelFont = CreateFont(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"ÂæÆËΩØÈõÖÈªë");
+        HFONT hOldFont = (HFONT)SelectObject(hdc, hLabelFont ? hLabelFont : GetStockObject(DEFAULT_GUI_FONT));
 
         RECT rc;
         GetClientRect(hWnd, &rc);
-        int listHeight = (rc.bottom - 100) / 2 - 10;
+        int listHeight = (rc.bottom - 110) / 2 - 10;
 
-        RECT rc1 = { 10, 25, 200, 45 };
-        DrawText(hdc, L"“—ÕÍ≥…≥…æÕ:", -1, &rc1, DT_LEFT);
+        RECT rc1 = { 10, 24, 360, 52 };
+        DrawText(hdc, L"Â∑≤ÂÆåÊàêÊàêÂ∞±:", -1, &rc1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        int uncompletedListTop = 60 + listHeight + 10;
-        RECT rc2 = { 10, uncompletedListTop - 20, 200, uncompletedListTop - 5 };
-        DrawText(hdc, L"Œ¥ÕÍ≥…≥…æÕ:", -1, &rc2, DT_LEFT);
+        int uncompletedListTop = 72 + listHeight + 18;
+        RECT rc2 = { 10, uncompletedListTop - 28, 360, uncompletedListTop - 4 };
+        DrawText(hdc, L"Êú™ÂÆåÊàêÊàêÂ∞±:", -1, &rc2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        if (g_pAdvManager && hVersionFont) {
-            HFONT hOldVersionFont = (HFONT)SelectObject(hdc, hVersionFont);
-            SetBkMode(hdc, TRANSPARENT);
-            SetTextColor(hdc, RGB(100, 100, 100));
+        if (g_pAdvManager) {
+            if (!hVersionFont) {
+                hVersionFont = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"ÂæÆËΩØÈõÖÈªë");
+            }
+            if (hVersionFont) {
+                HFONT hOldVersionFont = (HFONT)SelectObject(hdc, hVersionFont);
+                SetBkMode(hdc, TRANSPARENT);
+                SetTextColor(hdc, RGB(100, 100, 100));
 
-            std::wstring versionText = L"≥…æÕ¡–±Ì∞Ê±æ: " + g_pAdvManager->GetVersion();
-            RECT versionRect = { 10, rc.bottom - 25, rc.right - 10, rc.bottom - 5 };
-            DrawText(hdc, versionText.c_str(), -1, &versionRect, DT_LEFT);
+                std::wstring versionText = L"ÊàêÂ∞±ÂàóË°®ÁâàÊú¨: " + g_pAdvManager->GetVersion();
+                RECT versionRect = { 10, rc.bottom - 28, rc.right - 10, rc.bottom - 6 };
+                DrawText(hdc, versionText.c_str(), -1, &versionRect, DT_LEFT);
 
-            SelectObject(hdc, hOldVersionFont);
+                SelectObject(hdc, hOldVersionFont);
+            }
         }
 
         SelectObject(hdc, hOldFont);
+        if (hLabelFont) DeleteObject(hLabelFont);
 
         EndPaint(hWnd, &ps);
         break;
     }
 
     case WM_CLOSE:
-        DestroyWindow(hWnd);
+        if (g_pSettingsManager && g_pSettingsManager->IsCloseNoPrompt()) {
+            if (g_pSettingsManager->GetCloseAction() == CLOSE_ACTION_EXIT) {
+                DestroyWindow(hWnd);
+            }
+            else {
+                ShowWindow(hWnd, SW_HIDE);
+            }
+        }
+        else {
+            DialogBox(hInst, MAKEINTRESOURCE(IDD_CLOSE_CONFIRM), hWnd, CloseConfirmProc);
+        }
         break;
 
     case WM_DESTROY:
+        RemoveTrayIcon();
         if (hVersionFont) {
             DeleteObject(hVersionFont);
             hVersionFont = NULL;
@@ -1980,6 +2134,8 @@ BOOL InitInstance(HINSTANCE hInstance, int nCmdShow) {
 
     ShowWindow(hWnd, nCmdShow);
     UpdateWindow(hWnd);
+
+    AddTrayIcon(hWnd);
     return TRUE;
 }
 
@@ -2012,6 +2168,47 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
     Gdiplus::GdiplusShutdown(g_gdiplusToken);
     return (int)msg.wParam;
+}
+
+INT_PTR CALLBACK CloseConfirmProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    switch (message)
+    {
+    case WM_INITDIALOG:
+        CheckRadioButton(hDlg, ID_CLOSE_RADIO_EXIT, ID_CLOSE_RADIO_MIN, ID_CLOSE_RADIO_EXIT);
+        CheckDlgButton(hDlg, ID_CLOSE_NO_PROMPT, BST_UNCHECKED);
+        return (INT_PTR)TRUE;
+
+    case WM_COMMAND:
+        if (LOWORD(wParam) == IDOK) {
+            int action = (IsDlgButtonChecked(hDlg, ID_CLOSE_RADIO_EXIT) == BST_CHECKED)
+                ? CLOSE_ACTION_EXIT : CLOSE_ACTION_MIN;
+            bool noPrompt = (IsDlgButtonChecked(hDlg, ID_CLOSE_NO_PROMPT) == BST_CHECKED);
+
+            if (g_pSettingsManager) {
+                g_pSettingsManager->SetCloseAction(action);
+                g_pSettingsManager->SetCloseNoPrompt(noPrompt);
+                g_pSettingsManager->SaveSettings();
+            }
+
+            HWND hMain = g_hMainWnd;
+            EndDialog(hDlg, IDOK);
+
+            if (action == CLOSE_ACTION_EXIT) {
+                DestroyWindow(hMain);
+            }
+            else {
+                ShowWindow(hMain, SW_HIDE);
+            }
+            return (INT_PTR)TRUE;
+        }
+        else if (LOWORD(wParam) == IDCANCEL) {
+            EndDialog(hDlg, IDCANCEL);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+    return (INT_PTR)FALSE;
 }
 
 INT_PTR CALLBACK about(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)

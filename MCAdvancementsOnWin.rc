@@ -28,12 +28,31 @@ BEGIN
 MENUITEM "音效(&A)", IDM_SETTINGS_SOUND
 MENUITEM "提示触发方式(&T)", IDM_SETTINGS_SHOW_TRIGGER
 MENUITEM SEPARATOR
+MENUITEM "重新加载设置(&R)", IDM_SETTINGS_RELOAD
 MENUITEM "清空存档(&C)", IDM_SETTINGS_CLEAR_SAVE
 END
 POPUP "帮助(&H)"
 BEGIN
 MENUITEM "关于(&A)...", IDM_ABOUT
 END
+END
+
+/////////////////////////////////////////////////////////////////////////////
+//
+// 系统托盘右键菜单
+//
+
+IDR_TRAY_MENU MENU
+BEGIN
+    POPUP ""
+    BEGIN
+        MENUITEM "显示/隐藏窗口",         ID_TRAY_SHOW
+        MENUITEM SEPARATOR
+        MENUITEM "音效",                  ID_TRAY_SOUND
+        MENUITEM "关于",                  ID_TRAY_ABOUT
+        MENUITEM SEPARATOR
+        MENUITEM "退出程序",              ID_TRAY_EXIT
+    END
 END
 
 /////////////////////////////////////////////////////////////////////////////
@@ -47,10 +66,23 @@ CAPTION "关于 MC Advancements on Windows"
 FONT 9, "MS Shell Dlg"
 BEGIN
 ICON            IDI_MCADVANCEMENTSONWIN, IDC_STATIC, 14, 14, 21, 20
-LTEXT           "MC Advancements on Windows, 版本 beta-2026.8.7", IDC_STATIC, 42, 14, 200, 8, SS_NOPREFIX
-LTEXT           "由MoyeeLZX开发", IDC_STATIC, 42, 26, 114, 8
+LTEXT           "MC Advancements on Windows, 版本 beta-2026.8.11", IDC_STATIC, 42, 14, 200, 8, SS_NOPREFIX
+LTEXT           "由MoyeeLZX开发。  此程序与Mojang/Microsoft无关。", IDC_STATIC, 42, 26, 200, 8
 EDITTEXT        IDC_ABOUT_LINK, 14, 38, 200, 12, ES_READONLY | ES_AUTOHSCROLL | NOT WS_BORDER
 DEFPUSHBUTTON   "确定", IDOK, 165, 50, 50, 14, WS_GROUP
+END
+
+IDD_CLOSE_CONFIRM DIALOGEX 0, 0, 268, 160
+STYLE DS_SETFONT | DS_MODALFRAME | DS_FIXEDSYS | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "关闭确认"
+FONT 9, "MS Shell Dlg"
+BEGIN
+    LTEXT           "您要......", IDC_CLOSE_PROMPT, 14, 14, 240, 12
+    CONTROL         "再！见！", ID_CLOSE_RADIO_EXIT, "Button", BS_AUTORADIOBUTTON | WS_GROUP | WS_TABSTOP, 28, 36, 200, 14
+    CONTROL         "滚到后台去！", ID_CLOSE_RADIO_MIN, "Button", BS_AUTORADIOBUTTON, 28, 56, 200, 14
+    CONTROL         "我不想再看到你", ID_CLOSE_NO_PROMPT, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 28, 80, 200, 14
+    DEFPUSHBUTTON   "“好，我喜欢这个”", IDOK, 96, 120, 96, 16
+    PUSHBUTTON      "“我再回去看看”", IDCANCEL, 200, 120, 56, 16
 END
 
 /////////////////////////////////////////////////////////////////////////////
@@ -59,7 +91,7 @@ END
 //.
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION 2026, 8, 7
+FILEVERSION 21,2026, 8,11
 FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
 FILEFLAGS 0x1L
@@ -76,12 +108,12 @@ BLOCK "040904b0"
 BEGIN
 VALUE "CompanyName", "mylzx@2btb.top"
 VALUE "FileDescription", "MC Advancements on Windows"
-VALUE "FileVersion", "beta-2026.8.7"
+VALUE "FileVersion", "beta-2026.8.11"
 VALUE "InternalName", "MCAdvancementsOnWin"
 VALUE "LegalCopyright", "MoyeeLZX 2026"
 VALUE "OriginalFilename", "MCAdvancementsOnWin.exe"
 VALUE "ProductName", "MC Advancements on Windows"
-VALUE "ProductVersion", "beta-2026.8.7"
+VALUE "ProductVersion", "beta-2026.8.11"
 END
 END
 BLOCK "VarFileInfo"

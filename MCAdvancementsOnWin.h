@@ -1,4 +1,4 @@
-#pragma once
+ï»¿#pragma once
 
 #include <windows.h>
 #include <commctrl.h>
@@ -18,6 +18,10 @@
 
 #define WM_ADVANCEMENT_TRIGGERED (WM_USER + 100)
 
+// å…³é—­çª—å£æ—¶çš„é»˜è®¤åŠ¨ä½œ
+#define CLOSE_ACTION_MIN   0   // æœ€å°åŒ–åˆ°æ‰˜ç›˜ï¼ˆåå°è¿è¡Œï¼‰
+#define CLOSE_ACTION_EXIT  1   // é€€å‡ºç¨‹åº
+
 enum AdvancementTriggerType {
     TRIGGER_NONE = 0,
     TRIGGER_WINDOW_TITLE,
@@ -32,27 +36,30 @@ struct Advancement {
     std::wstring triggerDescription;
     std::wstring triggerValue;
     AdvancementTriggerType triggerType;
-    std::wstring iconBase64;  // Base64±àÂëµÄÍ¼±êÊı¾İ
+    std::wstring iconBase64;  // Base64ç¼–ç çš„å›¾æ ‡æ•°æ®
     bool completed = false;
 };
 
-// Í¨Öª´°¿ÚÊı¾İ½á¹¹Ìå
+// é€šçŸ¥çª—å£æ•°æ®ç»“æ„ä½“
 struct NotificationData {
     Advancement* pAdv;
     Gdiplus::Bitmap* pBitmap;
-    Gdiplus::Bitmap* pIconBitmap;  // Base64½âÂëºóµÄ³É¾ÍÍ¼±ê
-    std::wstring* pFontPath;  // ×ÖÌåÎÄ¼şÂ·¾¶£¨¿ÉÑ¡£©
+    Gdiplus::Bitmap* pIconBitmap;  // Base64è§£ç åçš„æˆå°±å›¾æ ‡
+    std::wstring* pFontPath;  // å­—ä½“æ–‡ä»¶è·¯å¾„ï¼ˆå¯é€‰ï¼‰
 };
 
-// ÉèÖÃ¹ÜÀíÆ÷
+// è®¾ç½®ç®¡ç†å™¨
 class SettingsManager {
 private:
     std::wstring configFilePath;
     bool soundEnabled;
     bool showTriggerInfo;
+    int closeAction;       // CLOSE_ACTION_MIN / CLOSE_ACTION_EXIT
+    bool closeNoPrompt;    // å…³é—­æ—¶æ˜¯å¦ä¸å†è¯¢é—®
 
 public:
-    SettingsManager() : soundEnabled(true), showTriggerInfo(false) {
+    SettingsManager() : soundEnabled(true), showTriggerInfo(false),
+        closeAction(CLOSE_ACTION_EXIT), closeNoPrompt(false) {
         WCHAR exePath[MAX_PATH];
         GetModuleFileName(NULL, exePath, MAX_PATH);
         std::wstring exeDir = std::wstring(exePath).substr(0, std::wstring(exePath).find_last_of(L"\\/"));
@@ -62,6 +69,8 @@ public:
     void LoadSettings() {
         soundEnabled = true;
         showTriggerInfo = false;
+        closeAction = CLOSE_ACTION_EXIT;
+        closeNoPrompt = false;
 
         std::wifstream file(configFilePath);
         if (file.is_open()) {
@@ -78,6 +87,12 @@ public:
                     else if (key == L"show_trigger") {
                         showTriggerInfo = (value == L"1" || value == L"true");
                     }
+                    else if (key == L"close_action") {
+                        closeAction = (value == L"1") ? CLOSE_ACTION_EXIT : CLOSE_ACTION_MIN;
+                    }
+                    else if (key == L"close_no_prompt") {
+                        closeNoPrompt = (value == L"1" || value == L"true");
+                    }
                 }
             }
             file.close();
@@ -89,6 +104,8 @@ public:
         if (file.is_open()) {
             file << L"sound=" << (soundEnabled ? L"1" : L"0") << std::endl;
             file << L"show_trigger=" << (showTriggerInfo ? L"1" : L"0") << std::endl;
+            file << L"close_action=" << (closeAction == CLOSE_ACTION_EXIT ? L"1" : L"0") << std::endl;
+            file << L"close_no_prompt=" << (closeNoPrompt ? L"1" : L"0") << std::endl;
             file.close();
         }
     }
@@ -98,6 +115,11 @@ public:
 
     bool IsShowTriggerInfo() const { return showTriggerInfo; }
     void SetShowTriggerInfo(bool show) { showTriggerInfo = show; }
+
+    int GetCloseAction() const { return closeAction; }
+    void SetCloseAction(int action) { closeAction = action; }
+    bool IsCloseNoPrompt() const { return closeNoPrompt; }
+    void SetCloseNoPrompt(bool noPrompt) { closeNoPrompt = noPrompt; }
 
     void UpdateSoundMenuItem(HWND hWnd, HMENU hMenu) {
         if (hMenu) {
@@ -124,7 +146,7 @@ private:
     HWND hMainWnd;
     HWND hListCompleted;
     HWND hListUncompleted;
-    std::wstring version;  // ĞÂÔö£º°æ±¾ĞÅÏ¢
+    std::wstring version;  // æ–°å¢ï¼šç‰ˆæœ¬ä¿¡æ¯
 
     std::thread monitorThread;
     std::atomic<bool> monitoring;
@@ -147,7 +169,7 @@ public:
     void StartMonitoring();
     void StopMonitoring();
     void CheckAndTriggerAdvancements();
-    const std::wstring& GetVersion() const { return version; }  // ĞÂÔö£º»ñÈ¡°æ±¾ĞÅÏ¢
+    const std::wstring& GetVersion() const { return version; }  // æ–°å¢ï¼šè·å–ç‰ˆæœ¬ä¿¡æ¯
 
     static void PlaySoundAsync(const std::wstring& soundPath);
 };
