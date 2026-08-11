@@ -14,9 +14,26 @@
 #define IDM_SETTINGS_CLEAR_SAVE 201
 #define IDM_FILE_UPDATE_JSON    202
 #define IDM_SETTINGS_SHOW_TRIGGER 203
+#define IDM_SETTINGS_RELOAD       204
 #define ID_LIST_COMPLETED       300
 #define ID_LIST_UNCOMPLETED     301
 #define IDC_ABOUT_LINK          302
+
+// 系统托盘右键菜单命令
+#define ID_TRAY_SHOW            40001
+#define ID_TRAY_SOUND           40002
+#define ID_TRAY_ABOUT           40003
+#define ID_TRAY_EXIT            40004
+
+// 系统托盘右键菜单资源
+#define IDR_TRAY_MENU           40005
+
+// 关闭确认对话框
+#define IDD_CLOSE_CONFIRM       40010
+#define IDC_CLOSE_PROMPT        40011
+#define ID_CLOSE_RADIO_EXIT     40012
+#define ID_CLOSE_RADIO_MIN      40013
+#define ID_CLOSE_NO_PROMPT      40014
 #define TIMER_CHECK_WINDOWS     1
 #define TIMER_NOTIFICATION_AUTO_CLOSE  2
 #define ANIMATION_TIMER         3
