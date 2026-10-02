@@ -40,6 +40,8 @@ HWND g_hCancelButton = nullptr;
 std::thread g_downloadThread;
 std::atomic<bool> g_bDownloading(false);
 std::atomic<bool> g_bDownloadCanceled(false);
+HINTERNET g_hInternet = NULL;
+HINTERNET g_hUrl = NULL;
 
 std::queue<Advancement> g_achievementQueue;
 std::mutex g_queueMutex;
@@ -487,18 +489,23 @@ bool IsJSONFileValid(const std::wstring& filePath) {
         content.find("\"title\"") != std::string::npos);
 }
 
+// 安全地关闭 WinINet 句柄：用原子交换保证只有一个线程真正执行关闭，
+// 这样 UI 线程可以关掉句柄来打断工作线程里阻塞的 InternetReadFile
+static void CloseInetHandle(HINTERNET& handle) {
+    HINTERNET h = (HINTERNET)InterlockedExchangePointer((PVOID*)&handle, NULL);
+    if (h) {
+        InternetCloseHandle(h);
+    }
+}
+
 void CancelDownload() {
     if (g_bDownloading) {
         g_bDownloadCanceled = true;
 
-        if (g_downloadThread.joinable()) {
-            auto startTime = std::chrono::steady_clock::now();
-            while (g_bDownloading &&
-                std::chrono::duration_cast<std::chrono::seconds>(
-                    std::chrono::steady_clock::now() - startTime).count() < 5) {
-                Sleep(100);
-            }
-        }
+        // 不要在这里等待工作线程：g_bDownloading 由主线程的 WM_USER+104 清除，
+        // 在消息处理里忙等会把它自己卡死，只能等到超时才关窗
+        CloseInetHandle(g_hUrl);
+        CloseInetHandle(g_hInternet);
 
         CloseDownloadWindow();
     }
@@ -1109,7 +1116,7 @@ void ShowDownloadWindow(HWND hParent) {
         L"DownloadProgressWindow",
         L"下载成就列表",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        x, y, 400, 180,
+        x, y, 413, 180,
         hParent, NULL, hInst, NULL
     );
 
@@ -1125,7 +1132,7 @@ void ShowDownloadWindow(HWND hParent) {
 
     g_hCancelButton = CreateWindowEx(0, L"BUTTON", L"取消",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        292, 108, 80, 25,
+        309, 108, 80, 25,
         g_hDownloadWnd, (HMENU)IDCANCEL, hInst, NULL);
 
     SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
@@ -1177,8 +1184,6 @@ bool DownloadAdvancementJson(HWND hWnd) {
         bool bSuccess = false;
         std::wstring errorMessage;
 
-        HINTERNET hInternet = NULL;
-        HINTERNET hUrl = NULL;
         HANDLE hFile = INVALID_HANDLE_VALUE;
         BOOL success = TRUE;
         DWORD totalBytes = 0;
@@ -1213,18 +1218,18 @@ bool DownloadAdvancementJson(HWND hWnd) {
 
         UpdateDownloadProgress(10, L"正在初始化网络连接...");
 
-        hInternet = InternetOpen(L"MCAdvancementsOnWin", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
-        if (!hInternet) {
+        g_hInternet = InternetOpen(L"MCAdvancementsOnWin", INTERNET_OPEN_TYPE_PRECONFIG, NULL, NULL, 0);
+        if (!g_hInternet) {
             errorMessage = L"初始化网络连接失败！";
             goto cleanup;
         }
 
         UpdateDownloadProgress(30, L"正在连接到服务器...");
-        hUrl = InternetOpenUrl(hInternet,
+        g_hUrl = InternetOpenUrl(g_hInternet,
             L"https://raw.githubusercontent.com/MoyeeLZX/MCAdvancementsOnWin/refs/heads/main/repo/adv.json",
             NULL, 0, INTERNET_FLAG_RELOAD, 0);
 
-        if (!hUrl) {
+        if (!g_hUrl) {
             errorMessage = L"无法连接到服务器！";
             goto cleanup;
         }
@@ -1241,11 +1246,11 @@ bool DownloadAdvancementJson(HWND hWnd) {
         totalBytes = 0;
         fileSize = 0;
 
-        if (HttpQueryInfoA(hUrl, HTTP_QUERY_CONTENT_LENGTH, sizeBuffer, &sizeBufferLen, NULL)) {
+        if (HttpQueryInfoA(g_hUrl, HTTP_QUERY_CONTENT_LENGTH, sizeBuffer, &sizeBufferLen, NULL)) {
             fileSize = atoi(sizeBuffer);
         }
 
-        while (InternetReadFile(hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
+        while (InternetReadFile(g_hUrl, buffer, sizeof(buffer), &bytesRead) && bytesRead > 0) {
             if (g_bDownloadCanceled) {
                 success = FALSE;
                 errorMessage = L"下载已被取消";
@@ -1270,10 +1275,8 @@ bool DownloadAdvancementJson(HWND hWnd) {
 
         CloseHandle(hFile);
         hFile = INVALID_HANDLE_VALUE;
-        InternetCloseHandle(hUrl);
-        hUrl = NULL;
-        InternetCloseHandle(hInternet);
-        hInternet = NULL;
+        CloseInetHandle(g_hUrl);
+        CloseInetHandle(g_hInternet);
 
         if (g_bDownloadCanceled) {
             DeleteFile(tempPath.c_str());
@@ -1342,11 +1345,16 @@ bool DownloadAdvancementJson(HWND hWnd) {
         if (hFile != INVALID_HANDLE_VALUE) {
             CloseHandle(hFile);
         }
-        if (hUrl) {
-            InternetCloseHandle(hUrl);
-        }
-        if (hInternet) {
-            InternetCloseHandle(hInternet);
+        CloseInetHandle(g_hUrl);
+        CloseInetHandle(g_hInternet);
+        DeleteFile(tempPath.c_str());
+
+        // 取消时关闭句柄会让 InternetOpen/InternetOpenUrl 直接失败，
+        // 这里必须先判取消，否则会被误报成“无法连接到服务器”
+        if (g_bDownloadCanceled) {
+            std::wstring* pMessage = new std::wstring(L"下载已被取消");
+            PostMessage(hWnd, WM_USER + 104, 0, (LPARAM)pMessage);
+            return;
         }
 
         std::wstring* pErrorMessage = new std::wstring(errorMessage);
@@ -2004,8 +2012,8 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     }
 
     case WM_USER + 104: {
+        // 用户主动取消：窗口已经关掉了，不再弹提示，只做收尾（回收消息、复位状态、回收线程）
         std::wstring* pMessage = (std::wstring*)lParam;
-        MessageBox(hWnd, pMessage->c_str(), L"下载取消", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
         delete pMessage;
 
         CloseDownloadWindow();
