@@ -1125,7 +1125,7 @@ void ShowDownloadWindow(HWND hParent) {
 
     g_hCancelButton = CreateWindowEx(0, L"BUTTON", L"取消",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        300, 115, 80, 25,
+        292, 108, 80, 25,
         g_hDownloadWnd, (HMENU)IDCANCEL, hInst, NULL);
 
     SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
