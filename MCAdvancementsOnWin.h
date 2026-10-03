@@ -54,11 +54,13 @@ private:
     std::wstring configFilePath;
     bool soundEnabled;
     bool showTriggerInfo;
+    bool clickNotifyToShow;  // 点击成就通知是否唤出主界面
     int closeAction;       // CLOSE_ACTION_MIN / CLOSE_ACTION_EXIT
     bool closeNoPrompt;    // 关闭时是否不再询问
 
 public:
     SettingsManager() : soundEnabled(true), showTriggerInfo(false),
+        clickNotifyToShow(true),
         closeAction(CLOSE_ACTION_EXIT), closeNoPrompt(false) {
         WCHAR exePath[MAX_PATH];
         GetModuleFileName(NULL, exePath, MAX_PATH);
@@ -69,6 +71,7 @@ public:
     void LoadSettings() {
         soundEnabled = true;
         showTriggerInfo = false;
+        clickNotifyToShow = true;
         closeAction = CLOSE_ACTION_EXIT;
         closeNoPrompt = false;
 
@@ -87,6 +90,9 @@ public:
                     else if (key == L"show_trigger") {
                         showTriggerInfo = (value == L"1" || value == L"true");
                     }
+                    else if (key == L"click_notify") {
+                        clickNotifyToShow = (value == L"1" || value == L"true");
+                    }
                     else if (key == L"close_action") {
                         closeAction = (value == L"1") ? CLOSE_ACTION_EXIT : CLOSE_ACTION_MIN;
                     }
@@ -104,6 +110,7 @@ public:
         if (file.is_open()) {
             file << L"sound=" << (soundEnabled ? L"1" : L"0") << std::endl;
             file << L"show_trigger=" << (showTriggerInfo ? L"1" : L"0") << std::endl;
+            file << L"click_notify=" << (clickNotifyToShow ? L"1" : L"0") << std::endl;
             file << L"close_action=" << (closeAction == CLOSE_ACTION_EXIT ? L"1" : L"0") << std::endl;
             file << L"close_no_prompt=" << (closeNoPrompt ? L"1" : L"0") << std::endl;
             file.close();
@@ -115,6 +122,9 @@ public:
 
     bool IsShowTriggerInfo() const { return showTriggerInfo; }
     void SetShowTriggerInfo(bool show) { showTriggerInfo = show; }
+
+    bool IsClickNotifyToShow() const { return clickNotifyToShow; }
+    void SetClickNotifyToShow(bool enable) { clickNotifyToShow = enable; }
 
     int GetCloseAction() const { return closeAction; }
     void SetCloseAction(int action) { closeAction = action; }
@@ -133,6 +143,7 @@ public:
         if (hMenu) {
             UpdateSoundMenuItem(hWnd, hMenu);
             CheckMenuItem(hMenu, IDM_SETTINGS_SHOW_TRIGGER, showTriggerInfo ? MF_CHECKED : MF_UNCHECKED);
+            CheckMenuItem(hMenu, IDM_SETTINGS_CLICK_NOTIFY, clickNotifyToShow ? MF_CHECKED : MF_UNCHECKED);
         }
     }
 };

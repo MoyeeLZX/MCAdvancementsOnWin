@@ -784,7 +784,9 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     wc.cbSize = sizeof(WNDCLASSEX);
     wc.lpfnWndProc = NotificationWndProc;
     wc.hInstance = hInst;
-    wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
+    // 允许点击唤出主界面时用“手型”光标提示可点击
+    bool notifyClickable = (g_pSettingsManager != nullptr && g_pSettingsManager->IsClickNotifyToShow());
+    wc.hCursor = LoadCursor(nullptr, notifyClickable ? IDC_HAND : IDC_ARROW);
     wc.hbrBackground = NULL;
     wc.style = CS_HREDRAW | CS_VREDRAW | CS_DBLCLKS;
     wc.lpszClassName = L"AdvancementNotification";
@@ -1424,6 +1426,18 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
     case WM_ERASEBKGND:
         return 1;
 
+    case WM_LBUTTONUP: {
+        if (g_pSettingsManager && !g_pSettingsManager->IsClickNotifyToShow()) {
+            break;
+        }
+
+        if (g_hMainWnd && IsWindow(g_hMainWnd)) {
+            ShowWindow(g_hMainWnd, SW_RESTORE);
+            SetForegroundWindow(g_hMainWnd);
+        }
+        return 0;
+    }
+
     case WM_CREATE: {
         OutputDebugString(L"WM_CREATE called\n");
 
@@ -1798,6 +1812,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 if (g_pAdvManager) {
                     g_pAdvManager->UpdateLists();
                 }
+            }
+        }
+        else if (wmId == IDM_SETTINGS_CLICK_NOTIFY) {
+            if (g_pSettingsManager) {
+                bool currentState = g_pSettingsManager->IsClickNotifyToShow();
+                g_pSettingsManager->SetClickNotifyToShow(!currentState);
+                g_pSettingsManager->SaveSettings();
+                g_pSettingsManager->UpdateAllMenuItems(hWnd);
             }
         }
         else if (wmId == IDM_SETTINGS_RELOAD) {
