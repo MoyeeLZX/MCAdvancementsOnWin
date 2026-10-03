@@ -16,6 +16,7 @@
 #define IDM_SETTINGS_SHOW_TRIGGER 203
 #define IDM_SETTINGS_RELOAD       204
 #define IDM_SETTINGS_CLICK_NOTIFY 205
+#define IDM_SETTINGS_DARK_MODE    206
 #define ID_LIST_COMPLETED       300
 #define ID_LIST_UNCOMPLETED     301
 #define IDC_ABOUT_LINK          302
@@ -35,6 +36,11 @@
 #define ID_CLOSE_RADIO_EXIT     40012
 #define ID_CLOSE_RADIO_MIN      40013
 #define ID_CLOSE_NO_PROMPT      40014
+
+// 替代 MessageBox 的通用消息对话框（深色/浅色主题通用）
+#define IDD_MESSAGE             40020
+#define IDC_MSG_ICON            40021
+#define IDC_MSG_TEXT            40022
 #define TIMER_CHECK_WINDOWS     1
 #define TIMER_NOTIFICATION_AUTO_CLOSE  2
 #define ANIMATION_TIMER         3

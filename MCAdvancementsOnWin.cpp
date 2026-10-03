@@ -232,6 +232,728 @@ static NotifyMetrics CalcNotifyMetrics() {
     return m;
 }
 
+// ===== 深色模式 =====
+// 配色：窗口/对话框底 #0A0A0A，列表（表格）底 #262626，正文白，次要信息灰
+// 菜单单独用一组贴合 Windows 10/11 系统深色菜单的配色
+#define DARK_COLOR_BG        RGB(0x0A, 0x0A, 0x0A)
+#define DARK_COLOR_SURFACE   RGB(0x26, 0x26, 0x26)
+#define DARK_COLOR_TEXT      RGB(0xFF, 0xFF, 0xFF)
+#define DARK_COLOR_TEXT_DIM  RGB(0x9A, 0x9A, 0x9A)
+#define DARK_COLOR_MENUBAR   RGB(0x1C, 0x1C, 0x1C)   // 菜单栏背景，贴合 Win11
+#define DARK_COLOR_MENUPOPUP RGB(0x2B, 0x2B, 0x2B)   // 弹出菜单背景
+#define DARK_COLOR_MENUSELECT RGB(0x4C, 0x4C, 0x4C)  // 选中项
+
+HBRUSH g_hDarkBgBrush = NULL;       // 窗口/对话框底色
+HBRUSH g_hDarkSurfaceBrush = NULL;  // 列表底色
+HBRUSH g_hDarkMenuBarBrush = NULL;  // 菜单栏背景
+HBRUSH g_hDarkMenuPopupBrush = NULL; // 弹出菜单背景
+
+static bool IsDarkModeEnabled() {
+    return g_pSettingsManager != nullptr && g_pSettingsManager->IsDarkMode();
+}
+
+static void EnsureDarkBrushes() {
+    if (!g_hDarkBgBrush) g_hDarkBgBrush = CreateSolidBrush(DARK_COLOR_BG);
+    if (!g_hDarkSurfaceBrush) g_hDarkSurfaceBrush = CreateSolidBrush(DARK_COLOR_SURFACE);
+    if (!g_hDarkMenuBarBrush) g_hDarkMenuBarBrush = CreateSolidBrush(DARK_COLOR_MENUBAR);
+    if (!g_hDarkMenuPopupBrush) g_hDarkMenuPopupBrush = CreateSolidBrush(DARK_COLOR_MENUPOPUP);
+}
+
+static void ReleaseDarkBrushes() {
+    if (g_hDarkBgBrush) { DeleteObject(g_hDarkBgBrush); g_hDarkBgBrush = NULL; }
+    if (g_hDarkSurfaceBrush) { DeleteObject(g_hDarkSurfaceBrush); g_hDarkSurfaceBrush = NULL; }
+    if (g_hDarkMenuBarBrush) { DeleteObject(g_hDarkMenuBarBrush); g_hDarkMenuBarBrush = NULL; }
+    if (g_hDarkMenuPopupBrush) { DeleteObject(g_hDarkMenuPopupBrush); g_hDarkMenuPopupBrush = NULL; }
+}
+
+// 在进程启动时调用一次（必须在创建任何窗口之前）：
+// 告诉系统"本进程允许使用深色模式"，这样后续 AllowDarkModeForWindow 才能生效。
+static void EnableDarkModeInfrastructure() {
+    HMODULE hUx = LoadLibraryW(L"uxtheme.dll");
+    if (!hUx) {
+        OutputDebugString(L"[Dark] uxtheme.dll 加载失败，菜单/标题栏无法走系统深色\n");
+        return;
+    }
+
+    typedef BOOL(WINAPI* PFN_SetPreferredAppMode)(int);
+    typedef void(WINAPI* PFN_RefreshImmersiveColorPolicyState)(void);
+
+    PFN_SetPreferredAppMode pSetMode = (PFN_SetPreferredAppMode)GetProcAddress(hUx, (LPCSTR)(ULONG_PTR)135);
+    if (pSetMode) {
+        BOOL r = pSetMode(1);   // AllowDark
+        wchar_t dbg[128];
+        swprintf_s(dbg, L"[Dark] SetPreferredAppMode(AllowDark) = %d\n", r);
+        OutputDebugString(dbg);
+    }
+    else {
+        OutputDebugString(L"[Dark] SetPreferredAppMode(ord 135) 未找到\n");
+    }
+
+    PFN_RefreshImmersiveColorPolicyState pRefresh =
+        (PFN_RefreshImmersiveColorPolicyState)GetProcAddress(hUx, (LPCSTR)(ULONG_PTR)132);
+    if (pRefresh) pRefresh();
+}
+
+// 逐窗口启用/关闭深色标题栏与菜单主题（Win10 1903+ / Win11）。
+static void ApplyDarkWindowFrame(HWND hWnd, bool enable) {
+    BOOL useDark = enable ? TRUE : FALSE;
+
+    HMODULE hUx = GetModuleHandleW(L"uxtheme.dll");
+    if (hUx) {
+        // 135=SetPreferredAppMode：ForceDark(2) / ForceLight(3)
+        // AllowDark(1) 只是"允许"，菜单栏不会变；必须 Force 才能强制系统菜单走深色
+        typedef BOOL(WINAPI* PFN_SetPreferredAppMode)(int);
+        typedef BOOL(WINAPI* PFN_AllowDarkModeForWindow)(HWND, BOOL);
+        typedef void(WINAPI* PFN_FlushMenuThemes)(void);
+        typedef void(WINAPI* PFN_RefreshImmersiveColorPolicyState)(void);
+
+        PFN_SetPreferredAppMode pSetMode = (PFN_SetPreferredAppMode)GetProcAddress(hUx, (LPCSTR)(ULONG_PTR)135);
+        if (pSetMode) {
+            pSetMode(enable ? 2 : 3);   // 2=ForceDark, 3=ForceLight
+        }
+
+        PFN_RefreshImmersiveColorPolicyState pRefresh =
+            (PFN_RefreshImmersiveColorPolicyState)GetProcAddress(hUx, (LPCSTR)(ULONG_PTR)132);
+        if (pRefresh) pRefresh();
+
+        PFN_AllowDarkModeForWindow pAllow = (PFN_AllowDarkModeForWindow)GetProcAddress(hUx, (LPCSTR)(ULONG_PTR)133);
+        if (pAllow) pAllow(hWnd, useDark);
+
+        PFN_FlushMenuThemes pFlush = (PFN_FlushMenuThemes)GetProcAddress(hUx, (LPCSTR)(ULONG_PTR)136);
+        if (pFlush) pFlush();
+    }
+
+    // 标题栏/边框
+    HMODULE hDwm = LoadLibraryW(L"dwmapi.dll");
+    if (hDwm) {
+        typedef HRESULT(WINAPI* PFN_DwmSetWindowAttribute)(HWND, DWORD, LPCVOID, DWORD);
+        PFN_DwmSetWindowAttribute pSetAttr = (PFN_DwmSetWindowAttribute)GetProcAddress(hDwm, "DwmSetWindowAttribute");
+        if (pSetAttr) {
+            // DWMWA_USE_IMMERSIVE_DARK_MODE：Win10 1809 用 19，1903+ / Win11 用 20；两个都试
+            HRESULT hr = pSetAttr(hWnd, 20, &useDark, sizeof(useDark));
+            if (FAILED(hr)) pSetAttr(hWnd, 19, &useDark, sizeof(useDark));
+        }
+    }
+
+    // 强制菜单栏重画，让主题立即生效
+    if (hWnd) DrawMenuBar(hWnd);
+}
+
+// ===== 深色模式：菜单自绘 =====
+// 系统未文档化 API 对菜单栏无效，只能自绘。
+// 关键：用 SystemParametersInfo 取系统菜单字体（Segoe UI 9pt），
+// 保证视觉上和系统菜单一模一样，只是颜色变深。
+
+HFONT g_hMenuFont = NULL;
+
+static HFONT GetMenuFont() {
+    if (g_hMenuFont) return g_hMenuFont;
+
+    NONCLIENTMETRICS ncm;
+    ncm.cbSize = sizeof(NONCLIENTMETRICS);
+    if (SystemParametersInfo(SPI_GETNONCLIENTMETRICS, sizeof(ncm), &ncm, 0)) {
+        g_hMenuFont = CreateFontIndirect(&ncm.lfMenuFont);
+    }
+    if (!g_hMenuFont) {
+        g_hMenuFont = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+    }
+    return g_hMenuFont;
+}
+
+#ifndef MNS_OWNERDRAW
+#define MNS_OWNERDRAW 0x40000000
+#endif
+
+struct MenuItemDrawInfo {
+    WCHAR text[128];
+    bool  separator;
+    bool  hasSubmenu;
+    bool  topLevel;
+    int   mnemonicPos;
+};
+
+static void FillMenuItemDrawInfo(HMENU hMenu, int depth) {
+    if (!hMenu) return;
+
+    int count = GetMenuItemCount(hMenu);
+    for (int i = 0; i < count; ++i) {
+        MENUITEMINFO mii;
+        ZeroMemory(&mii, sizeof(mii));
+        mii.cbSize = sizeof(MENUITEMINFO);
+        mii.fMask = MIIM_FTYPE | MIIM_STRING | MIIM_SUBMENU | MIIM_DATA;
+
+        WCHAR buf[128] = { 0 };
+        mii.dwTypeData = buf;
+        mii.cch = 128;
+        if (!GetMenuItemInfo(hMenu, i, TRUE, &mii)) continue;
+
+        MenuItemDrawInfo* info = (MenuItemDrawInfo*)mii.dwItemData;
+        if (!info) {
+            info = new MenuItemDrawInfo();
+            mii.dwItemData = (ULONG_PTR)info;
+        }
+
+        info->separator = (mii.fType & MFT_SEPARATOR) != 0;
+        info->hasSubmenu = (mii.hSubMenu != NULL);
+        info->topLevel = (depth == 0);
+        info->mnemonicPos = -1;
+        info->text[0] = L'\0';
+
+        int outLen = 0;
+        for (int c = 0; buf[c] != L'\0' && outLen < 127; ++c) {
+            if (buf[c] == L'&') {
+                if (info->mnemonicPos < 0) info->mnemonicPos = outLen;
+                continue;
+            }
+            info->text[outLen++] = buf[c];
+        }
+        info->text[outLen] = L'\0';
+
+        mii.fMask = MIIM_DATA;
+        SetMenuItemInfo(hMenu, i, TRUE, &mii);
+
+        if (mii.hSubMenu) FillMenuItemDrawInfo(mii.hSubMenu, depth + 1);
+    }
+}
+
+static void FreeMenuItemDrawInfo(HMENU hMenu) {
+    if (!hMenu) return;
+    int count = GetMenuItemCount(hMenu);
+    for (int i = 0; i < count; ++i) {
+        MENUITEMINFO mii;
+        ZeroMemory(&mii, sizeof(mii));
+        mii.cbSize = sizeof(MENUITEMINFO);
+        mii.fMask = MIIM_SUBMENU | MIIM_DATA;
+        if (GetMenuItemInfo(hMenu, i, TRUE, &mii)) {
+            delete (MenuItemDrawInfo*)mii.dwItemData;
+            if (mii.hSubMenu) FreeMenuItemDrawInfo(mii.hSubMenu);
+        }
+    }
+}
+
+// 逐项设置/清除 MFT_OWNERDRAW
+static void SetMenuItemOwnerDrawType(HMENU hMenu, bool enable) {
+    if (!hMenu) return;
+    int count = GetMenuItemCount(hMenu);
+    for (int i = 0; i < count; ++i) {
+        MENUITEMINFO mii;
+        ZeroMemory(&mii, sizeof(mii));
+        mii.cbSize = sizeof(MENUITEMINFO);
+        mii.fMask = MIIM_FTYPE;
+        if (GetMenuItemInfo(hMenu, i, TRUE, &mii)) {
+            if (enable) mii.fType |= MFT_OWNERDRAW;
+            else        mii.fType &= ~MFT_OWNERDRAW;
+            SetMenuItemInfo(hMenu, i, TRUE, &mii);
+        }
+        HMENU hSub = GetSubMenu(hMenu, i);
+        if (hSub) SetMenuItemOwnerDrawType(hSub, enable);
+    }
+}
+
+// 设置/清除菜单背景画刷（MIM_BACKGROUND）
+static void SetMenuDarkBackground(HMENU hMenu, HBRUSH hbr) {
+    if (!hMenu) return;
+    MENUINFO mi;
+    ZeroMemory(&mi, sizeof(mi));
+    mi.cbSize = sizeof(MENUINFO);
+    mi.fMask = MIM_BACKGROUND;
+    mi.hbrBack = hbr;
+    SetMenuInfo(hMenu, &mi);
+
+    int count = GetMenuItemCount(hMenu);
+    for (int i = 0; i < count; ++i) {
+        HMENU hSub = GetSubMenu(hMenu, i);
+        if (hSub) SetMenuDarkBackground(hSub, hbr);
+    }
+}
+
+static void ApplyDarkMenus(bool enable) {
+    if (!g_hMainWnd) return;
+
+    if (enable) {
+        // 深色：在当前菜单上设自绘
+        EnsureDarkBrushes();
+        HMENU hMainMenu = GetMenu(g_hMainWnd);
+        FillMenuItemDrawInfo(hMainMenu, 0);
+        SetMenuItemOwnerDrawType(hMainMenu, true);
+        SetMenuDarkBackground(hMainMenu, g_hDarkMenuBarBrush);
+    }
+    else {
+        // 浅色：直接重新加载菜单资源，彻底清除所有自绘标志和项数据，
+        // 不留任何 MFT_OWNERDRAW / dwItemData / MIM_BACKGROUND 残留
+        HMENU hMainMenu = GetMenu(g_hMainWnd);
+        FreeMenuItemDrawInfo(hMainMenu);
+
+        HMENU hNewMenu = LoadMenu(hInst, MAKEINTRESOURCE(IDC_MCADVANCEMENTSONWIN));
+        if (hNewMenu) {
+            SetMenu(g_hMainWnd, hNewMenu);   // SetMenu 会销毁旧菜单
+            if (g_pSettingsManager) g_pSettingsManager->UpdateAllMenuItems(g_hMainWnd);
+        }
+    }
+
+    DrawMenuBar(g_hMainWnd);
+}
+
+static bool MeasureDarkMenuItem(MEASUREITEMSTRUCT* pmis) {
+    if (!pmis || pmis->CtlType != ODT_MENU) return false;
+
+    MenuItemDrawInfo* info = (MenuItemDrawInfo*)pmis->itemData;
+    HDC hdc = GetDC(NULL);
+    HFONT hOld = (HFONT)SelectObject(hdc, GetMenuFont());
+    SIZE sz = { 0 };
+    GetTextExtentPoint32(hdc, L"Ag", 2, &sz);
+    int textH = sz.cy;
+    int textW = 0;
+    if (info && !info->separator) {
+        GetTextExtentPoint32(hdc, info->text, (int)wcslen(info->text), &sz);
+        textW = sz.cx;
+    }
+    SelectObject(hdc, hOld);
+    ReleaseDC(NULL, hdc);
+
+    if (info && info->separator) {
+        pmis->itemWidth = 0;
+        pmis->itemHeight = GetSystemMetrics(SM_CYMENU) / 4;
+    }
+    else {
+        int padX = (info && info->topLevel) ? 16 : 48;
+        int padY = (info && info->topLevel) ? 4 : 6;
+        pmis->itemWidth = textW + padX;
+        pmis->itemHeight = textH + padY;
+        if (info && info->topLevel) {
+            int barH = GetSystemMetrics(SM_CYMENU);
+            if (unsigned(barH) > pmis->itemHeight) pmis->itemHeight = barH;
+        }
+    }
+    return true;
+}
+
+static bool DrawDarkMenuItem(DRAWITEMSTRUCT* pdis) {
+    if (!pdis || pdis->CtlType != ODT_MENU) return false;
+
+    MenuItemDrawInfo* info = (MenuItemDrawInfo*)pdis->itemData;
+    HDC hdc = pdis->hDC;
+    RECT rc = pdis->rcItem;
+
+    bool topLevel = info && info->topLevel;
+    bool selected = (pdis->itemState & ODS_SELECTED) != 0;
+    bool disabled = (pdis->itemState & (ODS_DISABLED | ODS_GRAYED)) != 0;
+    bool checked  = (pdis->itemState & ODS_CHECKED) != 0;
+
+    COLORREF bg = topLevel
+        ? (selected ? DARK_COLOR_MENUSELECT : DARK_COLOR_MENUBAR)
+        : (selected ? DARK_COLOR_MENUSELECT : DARK_COLOR_MENUPOPUP);
+    HBRUSH hbr = CreateSolidBrush(bg);
+    FillRect(hdc, &rc, hbr);
+    DeleteObject(hbr);
+
+    if (!info || info->separator) {
+        int y = (rc.top + rc.bottom) / 2;
+        HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0x45, 0x45, 0x45));
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+        MoveToEx(hdc, rc.left + 8, y, NULL);
+        LineTo(hdc, rc.right - 8, y);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
+        return true;
+    }
+
+    int padX = topLevel ? 8 : 24;
+    HFONT hOld = (HFONT)SelectObject(hdc, GetMenuFont());
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, disabled ? RGB(0x70, 0x70, 0x70) : DARK_COLOR_TEXT);
+
+    if (checked && !topLevel) {
+        RECT rcMark = { rc.left + 4, rc.top, rc.left + padX, rc.bottom };
+        DrawText(hdc, L"\u2713", -1, &rcMark, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    RECT rcText = { rc.left + padX, rc.top, rc.right - padX, rc.bottom };
+    DrawText(hdc, info->text, -1, &rcText, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_HIDEPREFIX);
+
+    if (info->mnemonicPos > 0) {
+        SIZE s1 = { 0 }, s2 = { 0 };
+        GetTextExtentPoint32(hdc, info->text, info->mnemonicPos, &s1);
+        GetTextExtentPoint32(hdc, info->text, info->mnemonicPos + 1, &s2);
+        int y = (rc.top + rc.bottom) / 2 + 6;
+        HPEN hPen = CreatePen(PS_SOLID, 1, DARK_COLOR_TEXT);
+        HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+        MoveToEx(hdc, rcText.left + s1.cx, y, NULL);
+        LineTo(hdc, rcText.left + s2.cx, y);
+        SelectObject(hdc, hOldPen);
+        DeleteObject(hPen);
+    }
+
+    if (info->hasSubmenu && !topLevel) {
+        RECT rcArrow = { rc.right - 22, rc.top, rc.right - 6, rc.bottom };
+        DrawText(hdc, L"\u203A", -1, &rcArrow, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+    }
+
+    SelectObject(hdc, hOld);
+    return true;
+}
+
+// 菜单栏最后一个顶级项右边的留白：MIM_BACKGROUND 对菜单栏不一定生效，
+// 在 WM_NCPAINT 里补画
+static void PaintMenuBarLeftover(HWND hWnd) {
+    MENUBARINFO mbi;
+    ZeroMemory(&mbi, sizeof(mbi));
+    mbi.cbSize = sizeof(MENUBARINFO);
+    if (!GetMenuBarInfo(hWnd, OBJID_MENU, 0, &mbi)) return;
+
+    HMENU hMenu = GetMenu(hWnd);
+    if (!hMenu) return;
+
+    RECT rcUsed = mbi.rcBar;
+    BOOL hasAny = FALSE;
+    int count = GetMenuItemCount(hMenu);
+    for (int i = 0; i < count; ++i) {
+        RECT rcItem;
+        if (GetMenuItemRect(hWnd, hMenu, i, &rcItem)) {
+            if (!hasAny) { rcUsed = rcItem; hasAny = TRUE; }
+            else UnionRect(&rcUsed, &rcUsed, &rcItem);
+        }
+    }
+    if (!hasAny || rcUsed.right >= mbi.rcBar.right) return;
+
+    RECT rcWin;
+    GetWindowRect(hWnd, &rcWin);
+
+    RECT rcFill = { rcUsed.right, mbi.rcBar.top, mbi.rcBar.right, mbi.rcBar.bottom };
+    OffsetRect(&rcFill, -rcWin.left, -rcWin.top);
+
+    HDC hdc = GetWindowDC(hWnd);
+    FillRect(hdc, &rcFill, g_hDarkMenuBarBrush);
+    ReleaseDC(hWnd, hdc);
+}
+
+// ===== 深色模式：按钮自绘 =====
+// 标准按钮不理 WM_CTLCOLORBTN，只能加 BS_OWNERDRAW 自己画
+static void MakeDarkOwnerDrawButton(HWND hParent, int ctrlId) {
+    if (!IsDarkModeEnabled()) return;
+    HWND hBtn = GetDlgItem(hParent, ctrlId);
+    if (!hBtn) return;
+
+    LONG_PTR style = GetWindowLongPtr(hBtn, GWL_STYLE);
+    SetWindowLongPtr(hBtn, GWL_STYLE, style | BS_OWNERDRAW);
+    InvalidateRect(hBtn, NULL, TRUE);
+}
+
+static bool DrawDarkOwnerButton(DRAWITEMSTRUCT* pdis) {
+    if (!pdis || pdis->CtlType != ODT_BUTTON) return false;
+
+    HDC hdc = pdis->hDC;
+    RECT rc = pdis->rcItem;
+    bool pressed  = (pdis->itemState & ODS_SELECTED) != 0;
+    bool disabled = (pdis->itemState & ODS_DISABLED) != 0;
+    bool focused  = (pdis->itemState & ODS_FOCUS) != 0;
+
+    COLORREF face = pressed ? RGB(0x45, 0x45, 0x45) : RGB(0x2A, 0x2A, 0x2A);
+    HBRUSH hbr = CreateSolidBrush(face);
+    FillRect(hdc, &rc, hbr);
+    DeleteObject(hbr);
+
+    HPEN hPen = CreatePen(PS_SOLID, 1, RGB(0x55, 0x55, 0x55));
+    HPEN hOldPen = (HPEN)SelectObject(hdc, hPen);
+    HBRUSH hOldBr = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(hdc, hOldPen);
+    SelectObject(hdc, hOldBr);
+    DeleteObject(hPen);
+
+    WCHAR text[128] = { 0 };
+    GetWindowText(pdis->hwndItem, text, 128);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, disabled ? RGB(0x70, 0x70, 0x70) : DARK_COLOR_TEXT);
+    DrawText(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_HIDEPREFIX);
+
+    if (focused) {
+        RECT rcFocus = { rc.left + 3, rc.top + 3, rc.right - 3, rc.bottom - 3 };
+        DrawFocusRect(hdc, &rcFocus);
+    }
+    return true;
+}
+
+// 主窗口、下载窗口、对话框共用的自绘分发
+static bool HandleDarkOwnerDraw(UINT message, WPARAM wParam, LPARAM lParam, INT_PTR* pResult) {
+    if (!IsDarkModeEnabled()) return false;
+
+    if (message == WM_MEASUREITEM) {
+        MEASUREITEMSTRUCT* pmis = (MEASUREITEMSTRUCT*)lParam;
+        if (pmis && pmis->CtlType == ODT_MENU && MeasureDarkMenuItem(pmis)) {
+            *pResult = TRUE;
+            return true;
+        }
+        return false;
+    }
+
+    if (message == WM_DRAWITEM) {
+        DRAWITEMSTRUCT* pdis = (DRAWITEMSTRUCT*)lParam;
+        if (!pdis) return false;
+        if (pdis->CtlType == ODT_MENU && DrawDarkMenuItem(pdis)) {
+            *pResult = TRUE;
+            return true;
+        }
+        if (pdis->CtlType == ODT_BUTTON && DrawDarkOwnerButton(pdis)) {
+            *pResult = TRUE;
+            return true;
+        }
+    }
+    return false;
+}
+
+// ===== 通用消息对话框（替代 MessageBox）=====
+// 深色/浅色主题下都用这一个窗口，布局和 About 一致，按钮直接放在底部，
+// 没有 MessageBox 那块独立的按钮区；配色随主题变化。
+struct MessageDialogData {
+    std::wstring caption;
+    std::wstring text;
+    UINT type;
+};
+
+// 对话框（关于 / 关闭确认 / 消息框）的深色处理：背景 + 静态文字 + 单选/复选
+static bool HandleDialogDarkColor(HWND hDlg, UINT message, WPARAM wParam, INT_PTR* pResult) {
+    if (!IsDarkModeEnabled()) return false;
+
+    // 对话框底部等没有子控件盖住的区域由 WM_ERASEBKGND 负责，不处理就会露白
+    if (message == WM_ERASEBKGND) {
+        RECT rc;
+        GetClientRect(hDlg, &rc);
+        FillRect((HDC)wParam, &rc, g_hDarkBgBrush);
+        *pResult = 1;
+        return true;
+    }
+
+    if (message != WM_CTLCOLORDLG && message != WM_CTLCOLORSTATIC) return false;
+
+    HDC hdcDlg = (HDC)wParam;
+    SetTextColor(hdcDlg, DARK_COLOR_TEXT);
+    SetBkColor(hdcDlg, DARK_COLOR_BG);
+    SetBkMode(hdcDlg, TRANSPARENT);
+    *pResult = (INT_PTR)g_hDarkBgBrush;
+    return true;
+}
+
+// 按"实际显示的像素大小"加载图标：先试 LoadIconWithScaleDown（Vista+，会挑最合适的尺寸再缩放），
+// 不行再用 LoadImage 取同尺寸。这样才能和 Windows 10/11 自己显示的一样清晰，不会先取 32 再被拉伸发虚
+static HICON LoadSizedIcon(LPCWSTR iconRes, int size) {
+    HICON hIcon = NULL;
+
+    HMODULE hComCtl = GetModuleHandleW(L"comctl32.dll");
+    if (hComCtl) {
+        typedef HRESULT(WINAPI* PFN_LoadIconWithScaleDown)(HINSTANCE, PCWSTR, int, int, HICON*);
+        PFN_LoadIconWithScaleDown pLoadScale =
+            (PFN_LoadIconWithScaleDown)GetProcAddress(hComCtl, "LoadIconWithScaleDown");
+        if (pLoadScale && SUCCEEDED(pLoadScale(NULL, iconRes, size, size, &hIcon)) && hIcon) {
+            return hIcon;
+        }
+    }
+
+    return (HICON)LoadImage(NULL, iconRes, IMAGE_ICON, size, size, LR_DEFAULTCOLOR);
+}
+
+// 对话框标题栏默认用的是系统通用图标，和主窗口不一致，这里统一设成程序图标
+static void SetDialogAppIcon(HWND hDlg) {
+    HICON hBig = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDI_MCADVANCEMENTSONWIN), IMAGE_ICON,
+        GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), LR_DEFAULTCOLOR | LR_SHARED);
+    HICON hSmall = (HICON)LoadImage(hInst, MAKEINTRESOURCE(IDI_MCADVANCEMENTSONWIN), IMAGE_ICON,
+        GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), LR_DEFAULTCOLOR | LR_SHARED);
+    if (hBig) SendMessage(hDlg, WM_SETICON, ICON_BIG, (LPARAM)hBig);
+    if (hSmall) SendMessage(hDlg, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
+}
+
+INT_PTR CALLBACK MessageDialogProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
+{
+    INT_PTR darkResult = 0;
+    if (HandleDialogDarkColor(hDlg, message, wParam, &darkResult)) {
+        return darkResult;
+    }
+    if (message == WM_DRAWITEM &&
+        HandleDarkOwnerDraw(message, wParam, lParam, &darkResult)) {
+        return darkResult;
+    }
+
+    switch (message)
+    {
+    case WM_INITDIALOG: {
+        MessageDialogData* data = (MessageDialogData*)lParam;
+        if (!data) return (INT_PTR)TRUE;
+
+        ApplyDarkWindowFrame(hDlg, IsDarkModeEnabled());
+        MakeDarkOwnerDrawButton(hDlg, IDOK);
+        MakeDarkOwnerDrawButton(hDlg, IDCANCEL);
+        MakeDarkOwnerDrawButton(hDlg, IDYES);
+        MakeDarkOwnerDrawButton(hDlg, IDNO);
+        SetWindowText(hDlg, data->caption.c_str());
+
+        HWND hText = GetDlgItem(hDlg, IDC_MSG_TEXT);
+        HWND hIcon = GetDlgItem(hDlg, IDC_MSG_ICON);
+        SetWindowText(hText, data->text.c_str());
+
+        // 按钮文字在运行时设置，资源文件里保持纯 ASCII，避免中文编码问题
+        SetDlgItemText(hDlg, IDOK, L"确定");
+        SetDlgItemText(hDlg, IDCANCEL, L"取消");
+        SetDlgItemText(hDlg, IDYES, L"是");
+        SetDlgItemText(hDlg, IDNO, L"否");
+
+        // 图标（MB_ICONERROR / MB_ICONWARNING / MB_ICONQUESTION / MB_ICONINFORMATION）
+        // IDI_* 就是 Windows 自己那套消息图标（ Vista 起的扁平样式，Win10/11 沿用）
+        int dpi = GetDpiForWindowSafe(hDlg);
+        int iconSize = ScaleDpi(32, dpi);
+
+        LPCWSTR iconRes = NULL;
+        if (data->type & MB_ICONERROR) iconRes = IDI_ERROR;
+        else if (data->type & MB_ICONWARNING) iconRes = IDI_WARNING;
+        else if (data->type & MB_ICONQUESTION) iconRes = IDI_QUESTION;
+        else if (data->type & MB_ICONINFORMATION) iconRes = IDI_INFORMATION;
+
+        bool hasIcon = iconRes != NULL;
+        if (hasIcon) {
+            HICON hIco = LoadSizedIcon(iconRes, iconSize);
+            if (hIco) {
+                SendMessage(hIcon, STM_SETICON, (WPARAM)hIco, 0);
+                SetProp(hDlg, L"MsgIcon", hIco);   // 对话框关闭时销毁
+            }
+            else {
+                hasIcon = false;
+                ShowWindow(hIcon, SW_HIDE);
+            }
+        }
+        else {
+            ShowWindow(hIcon, SW_HIDE);
+        }
+
+        // 标题栏图标也用程序图标
+        SetDialogAppIcon(hDlg);
+
+        // 量出文字需要多大（限宽按 DPI 缩放，超长自动换行）
+        HDC hdc = GetDC(hDlg);
+        HFONT hFont = (HFONT)SendMessage(hText, WM_GETFONT, 0, 0);
+        HFONT hOld = hFont ? (HFONT)SelectObject(hdc, hFont) : NULL;
+        RECT rcCalc = { 0, 0, ScaleDpi(320, dpi), 0 };
+        DrawText(hdc, data->text.c_str(), -1, &rcCalc, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+        if (hOld) SelectObject(hdc, hOld);
+        ReleaseDC(hDlg, hdc);
+
+        int margin = ScaleDpi(14, dpi);
+        int iconGap = ScaleDpi(12, dpi);
+        int btnW = ScaleDpi(88, dpi);
+        int btnH = ScaleDpi(26, dpi);
+        int btnGap = ScaleDpi(8, dpi);
+
+        int textW = rcCalc.right - rcCalc.left;
+        int textH = rcCalc.bottom - rcCalc.top;
+        int textLeft = margin + (hasIcon ? iconSize + iconGap : 0);
+
+        bool yesNo = (data->type & MB_YESNO) != 0;
+        bool okCancel = (data->type & MB_OKCANCEL) != 0;
+        int btnCount = (yesNo || okCancel) ? 2 : 1;
+
+        int clientW = textLeft + textW + margin;
+        int minClientW = btnCount * btnW + (btnCount - 1) * btnGap + margin * 2;
+        if (clientW < minClientW) clientW = minClientW;
+        if (clientW > ScaleDpi(560, dpi)) clientW = ScaleDpi(560, dpi);
+        int clientH = margin + textH + ScaleDpi(18, dpi) + btnH + margin;
+
+        // 用当前窗口的边框厚度换算外框尺寸，避免 AdjustWindowRect 在高 DPI 下的偏差
+        RECT rcWin, rcClient;
+        GetWindowRect(hDlg, &rcWin);
+        GetClientRect(hDlg, &rcClient);
+        int frameW = (rcWin.right - rcWin.left) - (rcClient.right - rcClient.left);
+        int frameH = (rcWin.bottom - rcWin.top) - (rcClient.bottom - rcClient.top);
+
+        int posX = rcWin.left;
+        int posY = rcWin.top;
+        if (g_hMainWnd && IsWindow(g_hMainWnd)) {   // 居中于主窗口
+            RECT rcOwner;
+            if (GetWindowRect(g_hMainWnd, &rcOwner)) {
+                posX = rcOwner.left + ((rcOwner.right - rcOwner.left) - (clientW + frameW)) / 2;
+                posY = rcOwner.top + ((rcOwner.bottom - rcOwner.top) - (clientH + frameH)) / 2;
+            }
+        }
+        SetWindowPos(hDlg, NULL, posX, posY, clientW + frameW, clientH + frameH,
+            SWP_NOZORDER | SWP_NOACTIVATE);
+
+        if (hasIcon) {
+            MoveWindow(hIcon, margin, margin, iconSize, iconSize, TRUE);
+        }
+        MoveWindow(hText, textLeft, margin, textW, textH, TRUE);
+
+        int btnY = clientH - margin - btnH;
+        int rightX = clientW - margin - btnW;
+        int ids[4] = { IDOK, IDCANCEL, IDYES, IDNO };
+        for (int i = 0; i < 4; ++i) {
+            ShowWindow(GetDlgItem(hDlg, ids[i]), SW_HIDE);
+        }
+
+        int defId;
+        if (yesNo) {
+            MoveWindow(GetDlgItem(hDlg, IDNO), rightX, btnY, btnW, btnH, TRUE);
+            MoveWindow(GetDlgItem(hDlg, IDYES), rightX - btnW - btnGap, btnY, btnW, btnH, TRUE);
+            ShowWindow(GetDlgItem(hDlg, IDNO), SW_SHOW);
+            ShowWindow(GetDlgItem(hDlg, IDYES), SW_SHOW);
+            defId = (data->type & MB_DEFBUTTON2) ? IDNO : IDYES;
+        }
+        else if (okCancel) {
+            MoveWindow(GetDlgItem(hDlg, IDCANCEL), rightX, btnY, btnW, btnH, TRUE);
+            MoveWindow(GetDlgItem(hDlg, IDOK), rightX - btnW - btnGap, btnY, btnW, btnH, TRUE);
+            ShowWindow(GetDlgItem(hDlg, IDCANCEL), SW_SHOW);
+            ShowWindow(GetDlgItem(hDlg, IDOK), SW_SHOW);
+            defId = (data->type & MB_DEFBUTTON2) ? IDCANCEL : IDOK;
+        }
+        else {
+            MoveWindow(GetDlgItem(hDlg, IDOK), rightX, btnY, btnW, btnH, TRUE);
+            ShowWindow(GetDlgItem(hDlg, IDOK), SW_SHOW);
+            defId = IDOK;
+        }
+
+        SendMessage(hDlg, DM_SETDEFID, defId, 0);
+        SendMessage(hDlg, WM_NEXTDLGCTL, (WPARAM)GetDlgItem(hDlg, defId), TRUE);
+        return (INT_PTR)FALSE;
+    }
+
+    case WM_COMMAND: {
+        int id = LOWORD(wParam);
+        if (id == IDOK || id == IDCANCEL || id == IDYES || id == IDNO) {
+            EndDialog(hDlg, id);
+            return (INT_PTR)TRUE;
+        }
+        break;
+    }
+
+    case WM_CLOSE:
+        EndDialog(hDlg, IDCANCEL);
+        return (INT_PTR)TRUE;
+
+    case WM_DESTROY: {
+        HICON hIco = (HICON)GetProp(hDlg, L"MsgIcon");
+        if (hIco) {
+            DestroyIcon(hIco);
+            RemoveProp(hDlg, L"MsgIcon");
+        }
+        break;
+    }
+    }
+    return (INT_PTR)FALSE;
+}
+
+// 两种主题下都用它代替 MessageBox，返回值与 MessageBox 一致（IDOK/IDYES/IDNO/IDCANCEL）
+static int ShowMessageDialog(HWND hOwner, const std::wstring& text, const std::wstring& caption, UINT type) {
+    EnsureDarkBrushes();
+
+    MessageDialogData data;
+    data.caption = caption;
+    data.text = text;
+    data.type = type;
+
+    INT_PTR result = DialogBoxParam(hInst, MAKEINTRESOURCE(IDD_MESSAGE), hOwner,
+        MessageDialogProc, (LPARAM)&data);
+    if (result <= 0) {
+        return MessageBox(hOwner, text.c_str(), caption.c_str(), type);   // 创建失败时兜底
+    }
+    return (int)result;
+}
+
 // 系统托盘（通知区域）相关
 #define WM_TRAYICON (WM_USER + 200)
 
@@ -294,12 +1016,24 @@ void ShowTrayMenu(HWND hWnd) {
             g_pSettingsManager->IsSoundEnabled() ? MF_CHECKED : MF_UNCHECKED);
     }
 
+    // 深色模式：给这个临时菜单也设上自绘（用 Win11 弹出菜单配色）
+    if (IsDarkModeEnabled()) {
+        EnsureDarkBrushes();
+        FillMenuItemDrawInfo(hMenu, 0);
+        SetMenuItemOwnerDrawType(hMenu, true);
+        SetMenuDarkBackground(hMenu, g_hDarkMenuPopupBrush);
+    }
+
     POINT pt;
     GetCursorPos(&pt);
     SetForegroundWindow(hWnd);
     TrackPopupMenu(hSubMenu, TPM_RIGHTBUTTON | TPM_BOTTOMALIGN | TPM_LEFTALIGN,
         pt.x, pt.y, 0, hWnd, NULL);
     PostMessage(hWnd, WM_NULL, 0, 0);
+
+    if (IsDarkModeEnabled()) {
+        FreeMenuItemDrawInfo(hMenu);   // 释放 new 出来的项数据
+    }
     DestroyMenu(hMenu);
 
     bShowing = false;
@@ -730,13 +1464,13 @@ bool AdvancementManager::LoadAdvancementsFromJSON() {
 
     if (GetFileAttributes(jsonFilePath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         std::wstring errorMsg = L"找不到成就配置文件！\n请确保以下文件存在：\n" + jsonFilePath;
-        MessageBox(hMainWnd, errorMsg.c_str(), L"错误", MB_ICONERROR | MB_OK);
+        ShowMessageDialog(hMainWnd, errorMsg.c_str(), L"错误", MB_ICONERROR | MB_OK);
         return false;
     }
 
     std::string jsonContent = ReadFileAsUTF8(jsonFilePath);
     if (jsonContent.empty()) {
-        MessageBox(hMainWnd, L"JSON文件为空或读取失败！", L"错误", MB_ICONERROR | MB_OK);
+        ShowMessageDialog(hMainWnd, L"JSON文件为空或读取失败！", L"错误", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -823,7 +1557,7 @@ bool AdvancementManager::LoadAdvancementsFromJSON() {
     }
 
     if (advancements.empty()) {
-        MessageBox(hMainWnd, L"JSON解析失败或没有找到成就配置！", L"错误", MB_ICONERROR | MB_OK);
+        ShowMessageDialog(hMainWnd, L"JSON解析失败或没有找到成就配置！", L"错误", MB_ICONERROR | MB_OK);
         return false;
     }
 
@@ -1288,7 +2022,7 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
 
 void AdvancementManager::Initialize() {
     if (!LoadAdvancementsFromJSON()) {
-        MessageBox(hMainWnd, L"加载成就配置失败，程序将退出！", L"错误", MB_ICONERROR | MB_OK);
+        ShowMessageDialog(hMainWnd, L"加载成就配置失败，程序将退出！", L"错误", MB_ICONERROR | MB_OK);
         PostQuitMessage(0);
         return;
     }
@@ -1495,6 +2229,17 @@ void ShowDownloadWindow(HWND hParent) {
         SendMessage(g_hCancelButton, WM_SETFONT, (WPARAM)hFont, TRUE);
     }
 
+    SetDialogAppIcon(g_hDownloadWnd);   // 和主窗口用同一个图标
+
+    if (IsDarkModeEnabled()) {
+        SendMessage(g_hProgressBar, PBM_SETBARCOLOR, 0, (LPARAM)RGB(0x3A, 0x7A, 0x3A));
+        SendMessage(g_hProgressBar, PBM_SETBKCOLOR, 0, (LPARAM)DARK_COLOR_SURFACE);
+        MakeDarkOwnerDrawButton(g_hDownloadWnd, IDCANCEL);
+    }
+
+    EnsureDarkBrushes();
+    ApplyDarkWindowFrame(g_hDownloadWnd, IsDarkModeEnabled());
+
     ShowWindow(g_hDownloadWnd, SW_SHOW);
     UpdateWindow(g_hDownloadWnd);
 }
@@ -1520,7 +2265,7 @@ void UpdateDownloadProgress(int progress, const std::wstring& status) {
 
 bool DownloadAdvancementJson(HWND hWnd) {
     if (g_bDownloading) {
-        MessageBox(hWnd, L"当前正在下载，请稍候...", L"提示", MB_ICONINFORMATION | MB_OK);
+        ShowMessageDialog(hWnd, L"当前正在下载，请稍候...", L"提示", MB_ICONINFORMATION | MB_OK);
         return false;
     }
 
@@ -1724,6 +2469,14 @@ LRESULT CALLBACK DownloadWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         }
         break;
 
+    case WM_DRAWITEM: {
+        INT_PTR drawResult = 0;
+        if (HandleDarkOwnerDraw(message, wParam, lParam, &drawResult)) {
+            return (LRESULT)drawResult;   // 深色模式下"取消"按钮自绘
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+
     case WM_CLOSE:
         if (g_bDownloading) {
             CancelDownload();
@@ -1739,6 +2492,27 @@ LRESULT CALLBACK DownloadWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         g_hCancelButton = nullptr;
         break;
 
+    case WM_ERASEBKGND: {
+        if (!IsDarkModeEnabled()) {
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        FillRect((HDC)wParam, &rc, g_hDarkBgBrush);
+        return 1;
+    }
+
+    case WM_CTLCOLORSTATIC: {
+        if (!IsDarkModeEnabled()) {
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        HDC hdcCtl = (HDC)wParam;
+        SetTextColor(hdcCtl, DARK_COLOR_TEXT);
+        SetBkColor(hdcCtl, DARK_COLOR_BG);
+        SetBkMode(hdcCtl, TRANSPARENT);
+        return (LRESULT)g_hDarkBgBrush;
+    }
+
     case WM_PAINT: {
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
@@ -1748,6 +2522,7 @@ LRESULT CALLBACK DownloadWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         HFONT hFont = CreateUIFont(hWnd, 16, FW_BOLD, L"微软雅黑");
         HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
         SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, IsDarkModeEnabled() ? DARK_COLOR_TEXT : GetSysColor(COLOR_WINDOWTEXT));
         DrawText(hdc, L"正在下载成就列表...", -1, &rc, DT_LEFT);
         SelectObject(hdc, hOldFont);
         DeleteObject(hFont);
@@ -1970,7 +2745,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_pSettingsManager->LoadSettings();
         }
         else {
-            MessageBox(hWnd, L"无法初始化设置管理器！程序将退出。", L"错误", MB_ICONERROR | MB_OK);
+            ShowMessageDialog(hWnd, L"无法初始化设置管理器！程序将退出。", L"错误", MB_ICONERROR | MB_OK);
             PostQuitMessage(1);
             break;
         }
@@ -1984,9 +2759,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             g_pAdvManager->Initialize();
             SetTimer(hWnd, TIMER_CHECK_WINDOWS, 2000, NULL);
             g_pSettingsManager->UpdateAllMenuItems(hWnd);
+
+            EnsureDarkBrushes();
+            ApplyDarkWindowFrame(hWnd, g_pSettingsManager->IsDarkMode());
+            ApplyDarkMenus(g_pSettingsManager->IsDarkMode());
         }
         else {
-            MessageBox(hWnd, L"无法创建成就管理器！程序将退出。", L"错误", MB_ICONERROR | MB_OK);
+            ShowMessageDialog(hWnd, L"无法创建成就管理器！程序将退出。", L"错误", MB_ICONERROR | MB_OK);
             PostQuitMessage(1);
             break;
         }
@@ -2001,6 +2780,43 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         pMMI->ptMinTrackSize.y = ScaleDpi(minHeight, dpi);
     }
     break;
+
+    case WM_MEASUREITEM:
+    case WM_DRAWITEM: {
+        INT_PTR drawResult = 0;
+        if (HandleDarkOwnerDraw(message, wParam, lParam, &drawResult)) {
+            return (LRESULT)drawResult;
+        }
+        return DefWindowProc(hWnd, message, wParam, lParam);
+    }
+
+    case WM_NCPAINT: {
+        LRESULT ncResult = DefWindowProc(hWnd, message, wParam, lParam);
+        if (IsDarkModeEnabled() && g_hDarkMenuBarBrush) {
+            PaintMenuBarLeftover(hWnd);
+        }
+        return ncResult;
+    }
+
+    case WM_ERASEBKGND: {
+        if (!IsDarkModeEnabled()) {
+            return DefWindowProc(hWnd, message, wParam, lParam);   // 浅色时照旧用窗口类的画刷
+        }
+        RECT rc;
+        GetClientRect(hWnd, &rc);
+        FillRect((HDC)wParam, &rc, g_hDarkBgBrush);
+        return 1;
+    }
+
+    case WM_CTLCOLORLISTBOX: {
+        if (!IsDarkModeEnabled()) {
+            return DefWindowProc(hWnd, message, wParam, lParam);
+        }
+        HDC hdcCtl = (HDC)wParam;
+        SetTextColor(hdcCtl, DARK_COLOR_TEXT);
+        SetBkColor(hdcCtl, DARK_COLOR_SURFACE);
+        return (LRESULT)g_hDarkSurfaceBrush;
+    }
 
     case WM_DPICHANGED: {
         // 跨显示器拖动或系统缩放变更时触发；lParam 给出系统建议的新窗口矩形（物理像素）
@@ -2064,21 +2880,41 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 g_pSettingsManager->UpdateAllMenuItems(hWnd);
             }
         }
+        else if (wmId == IDM_SETTINGS_DARK_MODE) {
+            if (g_pSettingsManager) {
+                bool dark = !g_pSettingsManager->IsDarkMode();
+                g_pSettingsManager->SetDarkMode(dark);
+                g_pSettingsManager->SaveSettings();
+                g_pSettingsManager->UpdateAllMenuItems(hWnd);
+
+                EnsureDarkBrushes();
+                ApplyDarkWindowFrame(hWnd, dark);
+                ApplyDarkMenus(dark);
+
+                // 连子窗口一起重画，列表才能立刻换上新配色
+                RedrawWindow(hWnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
+            }
+        }
         else if (wmId == IDM_SETTINGS_RELOAD) {
             if (g_pSettingsManager) {
                 g_pSettingsManager->LoadSettings();
                 g_pSettingsManager->UpdateAllMenuItems(hWnd);
+
+                EnsureDarkBrushes();
+                ApplyDarkWindowFrame(hWnd, g_pSettingsManager->IsDarkMode());
+                ApplyDarkMenus(g_pSettingsManager->IsDarkMode());
+                RedrawWindow(hWnd, NULL, NULL, RDW_ERASE | RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_FRAME);
             }
             if (g_pAdvManager) {
                 g_pAdvManager->UpdateLists();
             }
-            MessageBox(hWnd, L"设置已从 setting.config 重新加载。", L"重新加载设置", MB_OK | MB_ICONINFORMATION);
+            ShowMessageDialog(hWnd, L"设置已从 setting.config 重新加载。", L"重新加载设置", MB_OK | MB_ICONINFORMATION);
         }
         else if (wmId == IDM_SETTINGS_CLEAR_SAVE) {
-            int result = MessageBox(hWnd,
+            int result = ShowMessageDialog(hWnd,
                 L"您确定要清空存档吗？\n这将删除所有已完成的成就记录，删除后无法恢复。",
                 L"确认清空存档",
-                MB_YESNO | MB_ICONWARNING | MB_DEFBUTTON2);
+                MB_YESNO | MB_ICONQUESTION | MB_DEFBUTTON2);
 
             if (result == IDYES) {
                 WCHAR exePath[MAX_PATH];
@@ -2095,7 +2931,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                         RestartApplication();
                     }
                     else {
-                        MessageBox(hWnd, L"删除存档文件失败！", L"错误", MB_ICONERROR | MB_OK);
+                        ShowMessageDialog(hWnd, L"删除存档文件失败！", L"错误", MB_ICONERROR | MB_OK);
                     }
                 }
             }
@@ -2176,13 +3012,13 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         message += L"最新版本: " + downloadedVersion + L"\n\n";
         message += L"是否更新到最新版本？";
 
-        int result = MessageBox(hWnd, message.c_str(), L"发现新版本", MB_YESNO | MB_ICONQUESTION | MB_APPLMODAL);
+        int result = ShowMessageDialog(hWnd, message.c_str(), L"发现新版本", MB_YESNO | MB_ICONQUESTION | MB_APPLMODAL);
 
         if (result == IDYES) {
             bool hadOriginalFile = false;
             if (GetFileAttributes(jsonPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
                 if (MoveFile(jsonPath.c_str(), backupPath.c_str()) == FALSE) {
-                    MessageBox(hWnd, L"备份旧文件失败！", L"错误", MB_ICONERROR | MB_OK | MB_APPLMODAL);
+                    ShowMessageDialog(hWnd, L"备份旧文件失败！", L"错误", MB_ICONERROR | MB_OK | MB_APPLMODAL);
                     DeleteFile(tempPath.c_str());
                 }
                 else {
@@ -2199,14 +3035,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 successMessage += L"新版本: " + downloadedVersion + L"\n\n";
                 successMessage += L"需要重启程序以加载新的成就列表。\n是否立即重启？";
 
-                int restartResult = MessageBox(hWnd, successMessage.c_str(), L"更新成功", MB_YESNO | MB_ICONINFORMATION | MB_APPLMODAL);
+                int restartResult = ShowMessageDialog(hWnd, successMessage.c_str(), L"更新成功", MB_YESNO | MB_ICONINFORMATION | MB_APPLMODAL);
 
                 if (restartResult == IDYES) {
                     RestartApplication();
                 }
             }
             else {
-                MessageBox(hWnd, L"更新文件失败！", L"错误", MB_ICONERROR | MB_OK | MB_APPLMODAL);
+                ShowMessageDialog(hWnd, L"更新文件失败！", L"错误", MB_ICONERROR | MB_OK | MB_APPLMODAL);
                 if (hadOriginalFile && GetFileAttributes(backupPath.c_str()) != INVALID_FILE_ATTRIBUTES) {
                     MoveFile(backupPath.c_str(), jsonPath.c_str());
                 }
@@ -2215,7 +3051,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         }
         else {
             DeleteFile(tempPath.c_str());
-            MessageBox(hWnd, L"已取消更新。", L"取消更新", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
+            ShowMessageDialog(hWnd, L"已取消更新。", L"取消更新", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
         }
 
         delete[] pData;
@@ -2230,7 +3066,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_USER + 102: {
         std::wstring* pMessage = (std::wstring*)lParam;
-        MessageBox(hWnd, pMessage->c_str(), L"已是最新版本", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
+        ShowMessageDialog(hWnd, pMessage->c_str(), L"已是最新版本", MB_ICONINFORMATION | MB_OK | MB_APPLMODAL);
         delete pMessage;
 
         CloseDownloadWindow();
@@ -2243,7 +3079,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
     case WM_USER + 103: {
         std::wstring* pErrorMessage = (std::wstring*)lParam;
-        MessageBox(hWnd, pErrorMessage->c_str(), L"下载错误", MB_ICONERROR | MB_OK | MB_APPLMODAL);
+        ShowMessageDialog(hWnd, pErrorMessage->c_str(), L"下载错误", MB_ICONERROR | MB_OK | MB_APPLMODAL);
         delete pErrorMessage;
 
         CloseDownloadWindow();
@@ -2280,12 +3116,17 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
 
         MainLayout L = CalcMainLayout(hWnd);
         int dpi = GetDpiForWindowSafe(hWnd);
+        bool dark = IsDarkModeEnabled();
 
         HFONT hLabelFont = CreateUIFont(hWnd, 22, FW_BOLD, L"微软雅黑");
         HFONT hOldFont = (HFONT)SelectObject(hdc, hLabelFont ? hLabelFont : GetStockObject(DEFAULT_GUI_FONT));
 
         RECT rc;
         GetClientRect(hWnd, &rc);
+
+        // 不透明背景模式下文字会把底色刷成默认的白色块，所以必须透明
+        SetBkMode(hdc, TRANSPARENT);
+        SetTextColor(hdc, dark ? DARK_COLOR_TEXT : GetSysColor(COLOR_WINDOWTEXT));
 
         RECT rc1 = { L.marginX, ScaleDpi(24, dpi), L.labelRight, ScaleDpi(52, dpi) };
         DrawText(hdc, L"已完成成就:", -1, &rc1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -2301,7 +3142,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             if (hVersionFont) {
                 HFONT hOldVersionFont = (HFONT)SelectObject(hdc, hVersionFont);
                 SetBkMode(hdc, TRANSPARENT);
-                SetTextColor(hdc, RGB(100, 100, 100));
+                SetTextColor(hdc, dark ? DARK_COLOR_TEXT_DIM : RGB(100, 100, 100));
 
                 std::wstring versionText = L"成就列表版本: " + g_pAdvManager->GetVersion();
                 RECT versionRect = { L.marginX, rc.bottom - L.versionBand, rc.right - L.marginX, rc.bottom - ScaleDpi(6, dpi) };
@@ -2342,6 +3183,14 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             DeleteObject(g_hListFont);
             g_hListFont = NULL;
         }
+        ReleaseDarkBrushes();
+
+        FreeMenuItemDrawInfo(GetMenu(hWnd));
+        if (g_hMenuFont) {
+            DeleteObject(g_hMenuFont);
+            g_hMenuFont = NULL;
+        }
+
         if (g_pAdvManager) {
             g_pAdvManager->StopMonitoring();
             delete g_pAdvManager;
@@ -2402,6 +3251,10 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // 必须在创建任何窗口/HDC 之前调用，否则 DPI 感知设置不生效
     EnableDpiAwareness();
 
+    // 同样必须在创建任何窗口之前：告诉系统本进程允许深色模式，
+    // 这样后续 AllowDarkModeForWindow 才能让标题栏/菜单走深色主题
+    EnableDarkModeInfrastructure();
+
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
 
@@ -2430,9 +3283,21 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 
 INT_PTR CALLBACK CloseConfirmProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
+    INT_PTR darkResult = 0;
+    if (HandleDialogDarkColor(hDlg, message, wParam, &darkResult)) {
+        return darkResult;
+    }
+    if (message == WM_DRAWITEM && HandleDarkOwnerDraw(message, wParam, lParam, &darkResult)) {
+        return darkResult;
+    }
+
     switch (message)
     {
     case WM_INITDIALOG:
+        ApplyDarkWindowFrame(hDlg, IsDarkModeEnabled());
+        SetDialogAppIcon(hDlg);
+        MakeDarkOwnerDrawButton(hDlg, IDOK);
+        MakeDarkOwnerDrawButton(hDlg, IDCANCEL);
         CheckRadioButton(hDlg, ID_CLOSE_RADIO_EXIT, ID_CLOSE_RADIO_MIN, ID_CLOSE_RADIO_EXIT);
         CheckDlgButton(hDlg, ID_CLOSE_NO_PROMPT, BST_UNCHECKED);
         return (INT_PTR)TRUE;
@@ -2472,10 +3337,22 @@ INT_PTR CALLBACK CloseConfirmProc(HWND hDlg, UINT message, WPARAM wParam, LPARAM
 INT_PTR CALLBACK about(HWND hDlg, UINT message, WPARAM wParam, LPARAM lParam)
 {
     UNREFERENCED_PARAMETER(lParam);
+
+    INT_PTR darkResult = 0;
+    if (HandleDialogDarkColor(hDlg, message, wParam, &darkResult)) {
+        return darkResult;
+    }
+    if (message == WM_DRAWITEM && HandleDarkOwnerDraw(message, wParam, lParam, &darkResult)) {
+        return darkResult;
+    }
+
     switch (message)
     {
     case WM_INITDIALOG:
     {
+        ApplyDarkWindowFrame(hDlg, IsDarkModeEnabled());
+        SetDialogAppIcon(hDlg);
+        MakeDarkOwnerDrawButton(hDlg, IDOK);
         HWND hLink = GetDlgItem(hDlg, IDC_ABOUT_LINK);
         if (hLink) {
             SetWindowText(hLink, L"https://github.com/MoyeeLZX/MCAdvancementsOnWin");
