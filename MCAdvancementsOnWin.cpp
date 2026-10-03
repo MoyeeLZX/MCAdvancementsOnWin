@@ -48,6 +48,190 @@ std::mutex g_queueMutex;
 std::atomic<bool> g_showingNotification(false);
 std::atomic<int> g_notificationCount(0);
 
+// ===== DPI 适配 =====
+// 程序若不声明 DPI 感知，Windows 会用位图拉伸把整个窗口放大，高分屏上文字就会发虚。
+// 这里在进程启动时开启 Per-Monitor DPI 感知，并为所有硬编码像素值提供按 DPI 缩放的辅助函数。
+// 所有 API 都通过 GetProcAddress 动态解析：Win10/11 走最新接口，Win8.1 与 Wine 走回退路径，
+// 任何一步失败都退化成 96 DPI（即保持原本的像素尺寸），不会崩溃或变形。
+#ifndef WM_DPICHANGED
+#define WM_DPICHANGED 0x02E0
+#endif
+
+static void EnableDpiAwareness() {
+    typedef BOOL(WINAPI* PFN_SetProcessDpiAwarenessContext)(INT_PTR);
+    typedef HRESULT(WINAPI* PFN_SetProcessDpiAwareness)(int);
+    typedef BOOL(WINAPI* PFN_SetProcessDPIAware)(void);
+
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        PFN_SetProcessDpiAwarenessContext pSetContext =
+            (PFN_SetProcessDpiAwarenessContext)GetProcAddress(hUser32, "SetProcessDpiAwarenessContext");
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 即 ((DPI_AWARENESS_CONTEXT)-4)
+        // 不用 SDK 宏，避免在旧 SDK / Wine 头文件下编译不过
+        if (pSetContext && pSetContext((INT_PTR)-4)) {
+            return;   // Win10 1703 及以上
+        }
+    }
+
+    static HMODULE hShcore = LoadLibraryW(L"shcore.dll");
+    if (hShcore) {
+        PFN_SetProcessDpiAwareness pSetAwareness =
+            (PFN_SetProcessDpiAwareness)GetProcAddress(hShcore, "SetProcessDpiAwareness");
+        // PROCESS_PER_MONITOR_DPI_AWARE == 2
+        if (pSetAwareness && SUCCEEDED(pSetAwareness(2))) {
+            return;   // Win8.1 及以上
+        }
+    }
+
+    if (hUser32) {
+        PFN_SetProcessDPIAware pSetAware = (PFN_SetProcessDPIAware)GetProcAddress(hUser32, "SetProcessDPIAware");
+        if (pSetAware) pSetAware();   // Vista 起的系统级感知，Wine 也支持
+    }
+}
+
+// 取窗口所在显示器的 DPI（物理像素 = 逻辑像素 * dpi / 96）
+static int GetDpiForWindowSafe(HWND hWnd) {
+    typedef UINT(WINAPI* PFN_GetDpiForWindow)(HWND);
+    typedef HRESULT(WINAPI* PFN_GetDpiForMonitor)(HMONITOR, int, UINT*, UINT*);
+
+    int dpi = 0;
+
+    HMODULE hUser32 = GetModuleHandleW(L"user32.dll");
+    if (hUser32) {
+        PFN_GetDpiForWindow pGetDpiForWindow = (PFN_GetDpiForWindow)GetProcAddress(hUser32, "GetDpiForWindow");
+        if (pGetDpiForWindow) {
+            dpi = (int)pGetDpiForWindow(hWnd);
+        }
+    }
+
+    if (dpi <= 0 && hWnd) {
+        static HMODULE hShcore = LoadLibraryW(L"shcore.dll");
+        if (hShcore) {
+            PFN_GetDpiForMonitor pGetDpiForMonitor = (PFN_GetDpiForMonitor)GetProcAddress(hShcore, "GetDpiForMonitor");
+            if (pGetDpiForMonitor) {
+                UINT dpiX = 0, dpiY = 0;
+                // 第二个参数 MDT_EFFECTIVE_DPI == 0
+                if (SUCCEEDED(pGetDpiForMonitor(MonitorFromWindow(hWnd, MONITOR_DEFAULTTONEAREST), 0, &dpiX, &dpiY))) {
+                    dpi = (int)dpiX;
+                }
+            }
+        }
+    }
+
+    if (dpi <= 0) {
+        HDC hdc = GetDC(NULL);   // 兜底：系统 DPI，Win7 / Wine 上也能拿到合理值
+        if (hdc) {
+            dpi = GetDeviceCaps(hdc, LOGPIXELSY);
+            ReleaseDC(NULL, hdc);
+        }
+    }
+
+    return dpi > 0 ? dpi : 96;
+}
+
+// 把以 96 DPI 为基准书写的像素值换算到当前 DPI
+static int ScaleDpi(int value, int dpi) {
+    return MulDiv(value, dpi, 96);
+}
+
+static HFONT CreateUIFont(HWND hWnd, int logicalHeight, int weight, const wchar_t* faceName) {
+    return CreateFont(ScaleDpi(logicalHeight, GetDpiForWindowSafe(hWnd)), 0, 0, 0, weight,
+        FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, faceName);
+}
+
+// 主界面布局：全部以 96 DPI 的像素值书写，再按当前 DPI 缩放
+struct MainLayout {
+    int marginX;
+    int listWidth;
+    int list1Top;
+    int listHeight;
+    int list2Top;
+    int labelRight;
+    int versionBand;
+};
+
+static MainLayout CalcMainLayout(HWND hWnd) {
+    RECT rc = { 0 };
+    GetClientRect(hWnd, &rc);
+
+    int dpi = GetDpiForWindowSafe(hWnd);
+    MainLayout L;
+    L.marginX = ScaleDpi(10, dpi);
+    L.listWidth = rc.right - L.marginX * 2;
+    if (L.listWidth < 0) L.listWidth = 0;
+    L.list1Top = ScaleDpi(56, dpi);
+    L.listHeight = (rc.bottom - ScaleDpi(130, dpi)) / 2;   // 等价于原来的 (rc.bottom - 110) / 2 - 10
+    if (L.listHeight < ScaleDpi(20, dpi)) L.listHeight = ScaleDpi(20, dpi);
+    L.list2Top = ScaleDpi(90, dpi) + L.listHeight;         // 等价于原来的 72 + listHeight + 18
+    L.labelRight = ScaleDpi(360, dpi);
+    L.versionBand = ScaleDpi(28, dpi);
+    return L;
+}
+
+HFONT g_hListFont = NULL;   // 两个成就列表共用的字体，DPI 变化时需要重建
+
+static void UpdateListFont(HWND hWnd) {
+    HFONT hNew = CreateUIFont(hWnd, 22, FW_NORMAL, L"微软雅黑");
+    if (!hNew) return;
+
+    HWND hList1 = GetDlgItem(hWnd, ID_LIST_COMPLETED);
+    HWND hList2 = GetDlgItem(hWnd, ID_LIST_UNCOMPLETED);
+    if (hList1) SendMessage(hList1, WM_SETFONT, (WPARAM)hNew, TRUE);
+    if (hList2) SendMessage(hList2, WM_SETFONT, (WPARAM)hNew, TRUE);
+
+    if (g_hListFont) DeleteObject(g_hListFont);   // 旧的已不再被任何控件选中
+    g_hListFont = hNew;
+}
+
+static void LayoutLists(HWND hWnd) {
+    HWND hList1 = GetDlgItem(hWnd, ID_LIST_COMPLETED);
+    HWND hList2 = GetDlgItem(hWnd, ID_LIST_UNCOMPLETED);
+    if (!hList1 || !hList2) return;
+
+    MainLayout L = CalcMainLayout(hWnd);
+    MoveWindow(hList1, L.marginX, L.list1Top, L.listWidth, L.listHeight, TRUE);
+    MoveWindow(hList2, L.marginX, L.list2Top, L.listWidth, L.listHeight, TRUE);
+}
+
+// 成就通知所在显示器的矩形与 DPI（物理像素）。有了它，通知在多显示器/高 DPI 下位置和大小才正确。
+struct NotifyMetrics {
+    int dpi;
+    int left;
+    int top;
+    int right;
+    int bottom;
+    int windowWidth;
+    int windowHeight;
+};
+
+static NotifyMetrics CalcNotifyMetrics() {
+    NotifyMetrics m;
+    MONITORINFO mi;
+    mi.cbSize = sizeof(MONITORINFO);
+    HMONITOR hMon = MonitorFromWindow(g_hMainWnd ? g_hMainWnd : GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY);
+
+    if (!GetMonitorInfo(hMon, &mi)) {
+        mi.rcMonitor.left = 0;
+        mi.rcMonitor.top = 0;
+        mi.rcMonitor.right = GetSystemMetrics(SM_CXSCREEN);
+        mi.rcMonitor.bottom = GetSystemMetrics(SM_CYSCREEN);
+    }
+
+    m.left = mi.rcMonitor.left;
+    m.top = mi.rcMonitor.top;
+    m.right = mi.rcMonitor.right;
+    m.bottom = mi.rcMonitor.bottom;
+    m.dpi = GetDpiForWindowSafe(g_hMainWnd);
+
+    int width = m.right - m.left;
+    int height = m.bottom - m.top;
+    int shortSide = (width < height) ? width : height;
+    m.windowHeight = shortSide / 10;
+    m.windowWidth = m.windowHeight * 5;
+    return m;
+}
+
 // 系统托盘（通知区域）相关
 #define WM_TRAYICON (WM_USER + 200)
 
@@ -814,19 +998,18 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
         OutputDebugString(debugMsg);
     }
 
-    int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-    int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-    int shortSide = min(screenWidth, screenHeight);
+    // 用窗口所在显示器的矩形（物理像素）而不是 SM_CXSCREEN，
+    // 这样多显示器不同 DPI 时，通知仍能贴着正确屏幕的右上角
+    NotifyMetrics nm = CalcNotifyMetrics();
+    int windowHeight = nm.windowHeight;
+    int windowWidth = nm.windowWidth;
 
-    int windowHeight = shortSide / 10;
-    int windowWidth = windowHeight * 5;
-
-    int verticalSpacing = 10;
+    int verticalSpacing = ScaleDpi(10, nm.dpi);
     int currentCount = g_notificationCount.load();
-    int yPos = (windowHeight + verticalSpacing) * currentCount;
+    int yPos = nm.top + (windowHeight + verticalSpacing) * currentCount;
 
-    if (yPos + windowHeight > GetSystemMetrics(SM_CYSCREEN)) {
-        yPos = 0;
+    if (yPos + windowHeight > nm.bottom) {
+        yPos = nm.top;
     }
 
     g_notificationCount++;
@@ -851,7 +1034,7 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
         L"AdvancementNotification",
         L"Achievement",
         WS_POPUP,
-        screenWidth, yPos, windowWidth, windowHeight,
+        nm.right, yPos, windowWidth, windowHeight,   // 从屏幕右侧外面滑入
         NULL, NULL, hInst, NULL
     );
 
@@ -881,7 +1064,7 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     }
     else {
         pData->pIconBitmap = BitmapFromBase64DataURI(
-            L"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABACAYAAACqaXHeAAAACXBIWXMAAA7EAAAOxAGVKw4bAAAE7mlUWHRYTUw6Y29tLmFkb2JlLnhtcAAAAAAAPD94cGFja2V0IGJlZ2luPSLvu78iIGlkPSJXNU0wTXBDZWhpSHpyZVN6TlRjemtjOWQiPz4gPHg6eG1wbWV0YSB4bWxuczp4PSJhZG9iZTpuczptZXRhLyIgeDp4bXB0az0iQWRvYmUgWE1QIENvcmUgOS4xLWMwMDIgNzkuNzhiNzYzOCwgMjAyNS8wMi8xMS0xOToxMDowOCAgICAgICAgIj4gPHJkZjpSREYgeG1sbnM6cmRmPSJodHRwOi8vd3d3LnczLm9yZy8xOTk5LzAyLzIyLXJkZi1zeW50YXgtbnMjIj4gPHJkZjpEZXNjcmlwdGlvbiByZGY6YWJvdXQ9IiIgeG1sbnM6eG1wPSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvIiB4bWxuczpkYz0iaHR0cDovL3B1cmwub3JnL2RjL2VsZW1lbnRzLzEuMS8iIHhtbG5zOnBob3Rvc2hvcD0iaHR0cDovL25zLmFkb2JlLmNvbS9waG90b3Nob3AvMS4wLyIgeG1sbnM6eG1wTU09Imh0dHA6Ly9ucy5hZG9iZS5jb20veGFwLzEuMC9tbS8iIHhtbG5zOnN0RXZ0PSJodHRwOi8vbnMuYWRvYmUuY29tL3hhcC8xLjAvc1R5cGUvUmVzb3VyY2VFdmVudCMiIHhtcDpDcmVhdG9yVG9vbD0iQWRvYmUgUGhvdG9zaG9wIDI2LjUgKFdpbmRvd3MpIiB4bXA6Q3JlYXRlRGF0ZT0iMjAyNi0wNi0xNFQxNDo0NDo1OSswODowMCIgeG1wOk1vZGlmeURhdGU9IjIwMjYtMDYtMTRUMTU6MDQ6MDArMDg6MDAiIHhtcDpNZXRhZGF0YURhdGU9IjIwMjYtMDYtMTRUMTU6MDQ6MDArMDg6MDAiIGRjOmZvcm1hdD0iaW1hZ2UvcG5nIiBwaG90b3Nob3A6Q29sb3JNb2RlPSIzIiB4bXBNTTpJbnN0YW5jZUlEPSJ4bXAuaWlkOjYyOWNhNTU4LTFmZjctODE0ZS04YTA1LWM2YTgwNzY3ZTE5MyIgeG1wTU06RG9jdW1lbnRJRD0ieG1wLmRpZDo2MjljYTU1OC0xZmY3LTgxNGUtOGEwNS1jNmE4MDc2N2UxOTMiIHhtcE1NOk9yaWdpbmFsRG9jdW1lbnRJRD0ieG1wLmRpZDo2MjljYTU1OC0xZmY3LTgxNGUtOGEwNS1jNmE4MDc2N2UxOTMiPiA8eG1wTU06SGlzdG9yeT4gPHJkZjpTZXE+IDxyZGY6bGkgc3RFdnQ6YWN0aW9uPSJjcmVhdGVkIiBzdEV2dDppbnN0YW5jZUlEPSJ4bXAuaWlkOjYyOWNhNTU4LTFmZjctODE0ZS04YTA1LWM2YTgwNzY3ZTE5MyIgc3RFdnQ6d2hlbj0iMjAyNi0wNi0xNFQxNDo0NDo1OSswODowMCIgc3RFdnQ6c29mdHdhcmVBZ2VudD0iQWRvYmUgUGhvdG9zaG9wIDI2LjUgKFdpbmRvd3MpIi8+IDwvcmRmOlNlcT4gPC94bXBNTTpIaXN0b3J5PiA8L3JkZjpEZXNjcmlwdGlvbj4gPC9yZGY6UkRGPiA8L3g6eG1wbWV0YT4gPD94cGFja2V0IGVuZD0iciI/PlHbY14AAAKmSURBVHic7ZtNboMwFISfQ1acoYtw/0M1i56gi66w6MpVQ8Ce92un6kiVUArPMPPZ/Dpt20bRyjnfiIimr+s7EVGe14WIaJqme/S+XKIb3B/87+Xyv0iFG0D0ePC13yIUagCScDQF4QTUku5BQZgBnGQjKQglAEk4moIQAySJRlEQRgAn2UgK3A2oJZnndSkXQdxtrRRCgCTRKApcDWilf7TMqWEhdwKq5/1puteu/yMocDMATb/2G1JLK1cCWukfLXNqWOjqURRJf79OSuktz+tydsA555vH7bKLAUT8q748r0tK6e1svVoX0ci8C6B9f2/Q/uEIt7ZULmMA2vf32rbtQ1JTI1MDuCO/ZF1rCswJkKaPrONBgZkBVukj21hSYEqANn1kXWsKTAywTh/Z1ooCMwKs0ke2saRAbYBX+kgNCwpMCLBOH9nWigKVAd7pI7W0FKgJ8EofqWFBgdiAqPSRmhoKVAR4p4/U0lIgMiA6faS2lAIxAVHpIzU1FLAN6JU+0oaEAhEB0ekjtaUUsAzonT7SFpcCNgG90kfakFAAGzBK+kibHApYBPROH2mLSwFkwGjpI22jFMAEWKe/33mukVYUNA3wSL/sfPk+QPOhpJYC6M2QR9+3ulM8O0j0bVKVgFH7/l4aCppdYJSRX7IPyFhwasCrpF8kpaBKwOjpF2koODTg1dIvklBwehaISP9opzRnFckZ4YmAsCe9v+YNlL9W+1BdJgWHXcA7/aNJE612EUnGggcDIvu+58dPHAqeCHiVkf9MXAp+DBhh5O/xNumBgMj0z+4Go98mXYji07e8G6wJoeDnOmCk5/xW9ZHrgssIfd9TLQquRO1TUo8Jjd4qFFQfiPSazBiptH1S/OThgdRl6uxI+jfgL4z0UuV5Xb4BpNcoyLX8aZgAAAAASUVORK5CYII="
+            L"data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEAAAABAAgMAAADXB5lNAAAADFBMVEUAAAD/8gD///////8x82RJAAAABHRSTlMA/yA8t+AKUgAAATFJREFUeJyN0zFyxCAMBVCGztxDBQeSsuM0W+4xcgn6NJ5JXOSM0UdgJFdL4fF+kHgLuynZqK8Ux7Hfgibxc27yFQPmGBTm7xBszM8QVOa4LzE/IkNahDSJkNz2I0AyPyhACr9qgGz83AKk8vkXIMS/nwFyyPERIE0oQJRB4iFgiIcog8RD1EDiITpJUhxEy0myg+gGGjiIEkjc1WBOgwVBtQYLgv4aLAgEGiwIpjRYEBRrsCBoj+CCAKDBBekzCCak1yKYkN4dwYT0/RFMSJ9AMCG9tO7pgvTm5SddkHUO9uZOyiDuLA3iTtsg7j7s1d2YLbbCfF7trHXB0za0zWtfh/fBsEKsHgwL8BwM6p2w42DUfUIGA9923KH/jaNh+BdgyyanGwppHIYkvo03gnuPfzaToGvt4mQmAAAAAElFTkSuQmCC"
         );   //没有有效的icon_base64就用它 ↑
     }
 
@@ -949,29 +1132,19 @@ void AdvancementManager::Initialize() {
 
     LoadAdvancements();
 
-    RECT rc;
-    GetClientRect(hMainWnd, &rc);
-    int listWidth = rc.right - 20;
-    int listHeight = (rc.bottom - 100) / 2 - 10;
+    MainLayout L = CalcMainLayout(hMainWnd);
 
     hListCompleted = CreateWindowEx(0, L"LISTBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL | LBS_HASSTRINGS,
-        10, 50, listWidth, listHeight,
+        L.marginX, L.list1Top, L.listWidth, L.listHeight,
         hMainWnd, (HMENU)ID_LIST_COMPLETED, hInst, NULL);
 
     hListUncompleted = CreateWindowEx(0, L"LISTBOX", L"",
         WS_CHILD | WS_VISIBLE | WS_BORDER | LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL | LBS_HASSTRINGS,
-        10, 60 + listHeight + 10, listWidth, listHeight,
+        L.marginX, L.list2Top, L.listWidth, L.listHeight,
         hMainWnd, (HMENU)ID_LIST_UNCOMPLETED, hInst, NULL);
 
-    HFONT hFont = CreateFont(22, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
-
-    if (hFont) {
-        SendMessage(hListCompleted, WM_SETFONT, (WPARAM)hFont, TRUE);
-        SendMessage(hListUncompleted, WM_SETFONT, (WPARAM)hFont, TRUE);
-    }
+    UpdateListFont(hMainWnd);   // 字体按当前 DPI 创建，并交给 g_hListFont 统一管理
 
     UpdateLists();
     StartMonitoring();
@@ -1119,41 +1292,41 @@ void ShowDownloadWindow(HWND hParent) {
         classRegistered = true;
     }
 
+    int dpi = GetDpiForWindowSafe(hParent);
+
     RECT rcParent;
     GetWindowRect(hParent, &rcParent);
-    int x = rcParent.left + (rcParent.right - rcParent.left) / 2 - 200;
-    int y = rcParent.top + (rcParent.bottom - rcParent.top) / 2 - 100;
+    int x = rcParent.left + (rcParent.right - rcParent.left) / 2 - ScaleDpi(200, dpi);
+    int y = rcParent.top + (rcParent.bottom - rcParent.top) / 2 - ScaleDpi(100, dpi);
 
     g_hDownloadWnd = CreateWindowEx(
         WS_EX_DLGMODALFRAME,
         L"DownloadProgressWindow",
         L"下载成就列表",
         WS_POPUP | WS_CAPTION | WS_SYSMENU,
-        x, y, 413, 180,
+        x, y, ScaleDpi(413, dpi), ScaleDpi(180, dpi),
         hParent, NULL, hInst, NULL
     );
 
     g_hProgressBar = CreateWindowEx(0, PROGRESS_CLASS, NULL,
         WS_CHILD | WS_VISIBLE | PBS_SMOOTH,
-        20, 50, 360, 25,
+        ScaleDpi(20, dpi), ScaleDpi(50, dpi), ScaleDpi(360, dpi), ScaleDpi(25, dpi),
         g_hDownloadWnd, NULL, hInst, NULL);
 
     g_hStatusText = CreateWindowEx(0, L"STATIC", L"正在连接到服务器...",
         WS_CHILD | WS_VISIBLE | SS_LEFT,
-        20, 85, 360, 20,
+        ScaleDpi(20, dpi), ScaleDpi(85, dpi), ScaleDpi(360, dpi), ScaleDpi(20, dpi),
         g_hDownloadWnd, NULL, hInst, NULL);
 
     g_hCancelButton = CreateWindowEx(0, L"BUTTON", L"取消",
         WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        309, 108, 80, 25,
+        ScaleDpi(309, dpi), ScaleDpi(108, dpi), ScaleDpi(80, dpi), ScaleDpi(25, dpi),
         g_hDownloadWnd, (HMENU)IDCANCEL, hInst, NULL);
 
     SendMessage(g_hProgressBar, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
     SendMessage(g_hProgressBar, PBM_SETPOS, 0, 0);
 
-    HFONT hFont = CreateFont(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+    HFONT hFont = CreateUIFont(hParent, 14, FW_NORMAL, L"微软雅黑");
     if (hFont) {
         SendMessage(g_hStatusText, WM_SETFONT, (WPARAM)hFont, TRUE);
         SendMessage(g_hCancelButton, WM_SETFONT, (WPARAM)hFont, TRUE);
@@ -1407,10 +1580,9 @@ LRESULT CALLBACK DownloadWndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM 
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
 
-        RECT rc = { 20, 20, 380, 40 };
-        HFONT hFont = CreateFont(16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+        int dpi = GetDpiForWindowSafe(hWnd);
+        RECT rc = { ScaleDpi(20, dpi), ScaleDpi(20, dpi), ScaleDpi(380, dpi), ScaleDpi(40, dpi) };
+        HFONT hFont = CreateUIFont(hWnd, 16, FW_BOLD, L"微软雅黑");
         HFONT hOldFont = (HFONT)SelectObject(hdc, hFont);
         SetBkMode(hdc, TRANSPARENT);
         DrawText(hdc, L"正在下载成就列表...", -1, &rc, DT_LEFT);
@@ -1432,6 +1604,7 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
     static int targetX = 0;
     static int startX = 0;
     static int currentY = 0;
+    static int screenRight = 0;   // 通知所在显示器右边界，滑出时用它
 
     switch (message) {
     case WM_ERASEBKGND:
@@ -1484,21 +1657,21 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
             }
         }
 
-        int screenWidth = GetSystemMetrics(SM_CXSCREEN);
-        int screenHeight = GetSystemMetrics(SM_CYSCREEN);
-        int shortSide = min(screenWidth, screenHeight);
+        NotifyMetrics nm = CalcNotifyMetrics();
+        int windowHeight2 = nm.windowHeight;
+        int windowWidth2 = nm.windowWidth;
 
-        int windowHeight2 = shortSide / 10;
-        int windowWidth2 = windowHeight2 * 5;
-
-        int verticalSpacing = 10;
+        int verticalSpacing = ScaleDpi(10, nm.dpi);
         int currentCount = g_notificationCount.load() - 1;
-        currentY = (windowHeight2 + verticalSpacing) * currentCount;
+        if (currentCount < 0) currentCount = 0;
+        currentY = nm.top + (windowHeight2 + verticalSpacing) * currentCount;
 
-        SetWindowPos(hWnd, NULL, screenWidth, currentY, windowWidth2, windowHeight2, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        screenRight = nm.right;
 
-        targetX = screenWidth - windowWidth2;
-        startX = screenWidth;
+        SetWindowPos(hWnd, NULL, nm.right, currentY, windowWidth2, windowHeight2, SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+
+        targetX = nm.right - windowWidth2;
+        startX = nm.right;
         animationStep = 0;
 
         SetTimer(hWnd, ANIMATION_TIMER, ANIMATION_INTERVAL, NULL);
@@ -1527,7 +1700,7 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         else if (wParam == TIMER_NOTIFICATION_AUTO_CLOSE) {
             animationStep = 0;
             startX = targetX;
-            targetX = GetSystemMetrics(SM_CXSCREEN);
+            targetX = screenRight;
             SetTimer(hWnd, TIMER_NOTIFICATION_SLIDE_OUT, ANIMATION_INTERVAL, NULL);
         }
         else if (wParam == TIMER_NOTIFICATION_SLIDE_OUT) {
@@ -1677,7 +1850,9 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 
             RECT rcAdv = { textLeft, windowHeight * 40 / 100, windowWidth - padding, windowHeight * 90 / 100 };
             std::wstring displayTitle = pData->pAdv->title;
-            int maxTitleLength = (windowWidth - textLeft) / 13;
+            // 13 是 96 DPI 下的单字宽度估算，必须随 DPI 一起放大，否则高 DPI 下会截断过度
+            int charWidth = ScaleDpi(13, GetDpiForWindowSafe(hWnd));
+            int maxTitleLength = (windowWidth - textLeft) / (charWidth > 0 ? charWidth : 13);
             if (maxTitleLength < 5) maxTitleLength = 5;
             if (displayTitle.length() > maxTitleLength) {
                 displayTitle = displayTitle.substr(0, maxTitleLength) + L"...";
@@ -1788,10 +1963,33 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
     case WM_GETMINMAXINFO:
     {
         MINMAXINFO* pMMI = (MINMAXINFO*)lParam;
-        pMMI->ptMinTrackSize.x = minWidth;
-        pMMI->ptMinTrackSize.y = minHeight;
+        int dpi = GetDpiForWindowSafe(hWnd);
+        pMMI->ptMinTrackSize.x = ScaleDpi(minWidth, dpi);
+        pMMI->ptMinTrackSize.y = ScaleDpi(minHeight, dpi);
     }
     break;
+
+    case WM_DPICHANGED: {
+        // 跨显示器拖动或系统缩放变更时触发；lParam 给出系统建议的新窗口矩形（物理像素）
+        if (lParam) {
+            RECT* pSuggested = (RECT*)lParam;
+            SetWindowPos(hWnd, NULL, pSuggested->left, pSuggested->top,
+                pSuggested->right - pSuggested->left, pSuggested->bottom - pSuggested->top,
+                SWP_NOZORDER | SWP_NOACTIVATE);
+        }
+
+        if (hVersionFont) {          // 字体是按旧 DPI 的像素大小创建的，必须重建
+            DeleteObject(hVersionFont);
+            hVersionFont = NULL;
+        }
+        UpdateListFont(hWnd);
+        LayoutLists(hWnd);
+        if (g_pAdvManager) {
+            g_pAdvManager->UpdateLists();   // 水平滚动范围依赖字体度量
+        }
+        InvalidateRect(hWnd, NULL, TRUE);
+        return 0;
+    }
 
     case WM_COMMAND: {
         int wmId = LOWORD(wParam);
@@ -1924,22 +2122,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             break;
         }
         if (g_pAdvManager) {
-            RECT rc;
-            GetClientRect(hWnd, &rc);
-
-            if (rc.right < minWidth) rc.right = minWidth;
-            if (rc.bottom < minHeight) rc.bottom = minHeight;
-
-            int listWidth = rc.right - 20;
-            int listHeight = (rc.bottom - 110) / 2 - 10;
-
-            HWND hList1 = GetDlgItem(hWnd, ID_LIST_COMPLETED);
-            HWND hList2 = GetDlgItem(hWnd, ID_LIST_UNCOMPLETED);
-
-            if (hList1 && hList2) {
-                MoveWindow(hList1, 10, 56, listWidth, listHeight, TRUE);
-                MoveWindow(hList2, 10, 72 + listHeight + 18, listWidth, listHeight, TRUE);
-            }
+            LayoutLists(hWnd);
         }
         break;
 
@@ -2062,27 +2245,25 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         PAINTSTRUCT ps;
         HDC hdc = BeginPaint(hWnd, &ps);
 
-        HFONT hLabelFont = CreateFont(22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-            DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+        MainLayout L = CalcMainLayout(hWnd);
+        int dpi = GetDpiForWindowSafe(hWnd);
+
+        HFONT hLabelFont = CreateUIFont(hWnd, 22, FW_BOLD, L"微软雅黑");
         HFONT hOldFont = (HFONT)SelectObject(hdc, hLabelFont ? hLabelFont : GetStockObject(DEFAULT_GUI_FONT));
 
         RECT rc;
         GetClientRect(hWnd, &rc);
-        int listHeight = (rc.bottom - 110) / 2 - 10;
 
-        RECT rc1 = { 10, 24, 360, 52 };
+        RECT rc1 = { L.marginX, ScaleDpi(24, dpi), L.labelRight, ScaleDpi(52, dpi) };
         DrawText(hdc, L"已完成成就:", -1, &rc1, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
-        int uncompletedListTop = 72 + listHeight + 18;
-        RECT rc2 = { 10, uncompletedListTop - 28, 360, uncompletedListTop - 4 };
+        int uncompletedListTop = L.list2Top;
+        RECT rc2 = { L.marginX, uncompletedListTop - ScaleDpi(28, dpi), L.labelRight, uncompletedListTop - ScaleDpi(4, dpi) };
         DrawText(hdc, L"未完成成就:", -1, &rc2, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
 
         if (g_pAdvManager) {
             if (!hVersionFont) {
-                hVersionFont = CreateFont(16, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"微软雅黑");
+                hVersionFont = CreateUIFont(hWnd, 16, FW_NORMAL, L"微软雅黑");
             }
             if (hVersionFont) {
                 HFONT hOldVersionFont = (HFONT)SelectObject(hdc, hVersionFont);
@@ -2090,7 +2271,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
                 SetTextColor(hdc, RGB(100, 100, 100));
 
                 std::wstring versionText = L"成就列表版本: " + g_pAdvManager->GetVersion();
-                RECT versionRect = { 10, rc.bottom - 28, rc.right - 10, rc.bottom - 6 };
+                RECT versionRect = { L.marginX, rc.bottom - L.versionBand, rc.right - L.marginX, rc.bottom - ScaleDpi(6, dpi) };
                 DrawText(hdc, versionText.c_str(), -1, &versionRect, DT_LEFT);
 
                 SelectObject(hdc, hOldVersionFont);
@@ -2123,6 +2304,10 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
         if (hVersionFont) {
             DeleteObject(hVersionFont);
             hVersionFont = NULL;
+        }
+        if (g_hListFont) {
+            DeleteObject(g_hListFont);
+            g_hListFont = NULL;
         }
         if (g_pAdvManager) {
             g_pAdvManager->StopMonitoring();
@@ -2163,8 +2348,10 @@ ATOM MyRegisterClass(HINSTANCE hInstance) {
 
 BOOL InitInstance(HINSTANCE hInstance, int nCmdShow) {
     hInst = hInstance;
+
+    int dpi = GetDpiForWindowSafe(NULL);
     HWND hWnd = CreateWindowW(szWindowClass, szTitle, WS_OVERLAPPEDWINDOW,
-        CW_USEDEFAULT, 0, 800, 600, nullptr, nullptr, hInstance, nullptr);
+        CW_USEDEFAULT, 0, ScaleDpi(800, dpi), ScaleDpi(600, dpi), nullptr, nullptr, hInstance, nullptr);
     if (!hWnd) return FALSE;
 
     ShowWindow(hWnd, nCmdShow);
@@ -2178,6 +2365,9 @@ int APIENTRY wWinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     LPWSTR lpCmdLine, int nCmdShow) {
     UNREFERENCED_PARAMETER(hPrevInstance);
     UNREFERENCED_PARAMETER(lpCmdLine);
+
+    // 必须在创建任何窗口/HDC 之前调用，否则 DPI 感知设置不生效
+    EnableDpiAwareness();
 
     GdiplusStartupInput gdiplusStartupInput;
     GdiplusStartup(&g_gdiplusToken, &gdiplusStartupInput, NULL);
