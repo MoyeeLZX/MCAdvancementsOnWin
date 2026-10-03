@@ -121,6 +121,17 @@ void ShowTrayMenu(HWND hWnd) {
     bShowing = false;
 }
 
+// 显示/隐藏主窗口：可见且未最小化时隐藏，否则恢复并置前
+static void ToggleMainWindow(HWND hWnd) {
+    if (IsWindowVisible(hWnd) && !IsIconic(hWnd)) {
+        ShowWindow(hWnd, SW_HIDE);
+    }
+    else {
+        ShowWindow(hWnd, SW_RESTORE);
+        SetForegroundWindow(hWnd);
+    }
+}
+
 ATOM MyRegisterClass(HINSTANCE hInstance);
 BOOL InitInstance(HINSTANCE, int);
 LRESULT CALLBACK WndProc(HWND, UINT, WPARAM, LPARAM);
@@ -1859,13 +1870,7 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             }
         }
         else if (wmId == ID_TRAY_SHOW) {
-            if (IsWindowVisible(hWnd)) {
-                ShowWindow(hWnd, SW_HIDE);
-            }
-            else {
-                ShowWindow(hWnd, SW_RESTORE);
-                SetForegroundWindow(hWnd);
-            }
+            ToggleMainWindow(hWnd);
         }
         else if (wmId == ID_TRAY_SOUND) {
             if (g_pSettingsManager) {
@@ -1907,16 +1912,16 @@ LRESULT CALLBACK WndProc(HWND hWnd, UINT message, WPARAM wParam, LPARAM lParam) 
             ShowTrayMenu(hWnd);
         }
         else if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
-            ShowWindow(hWnd, SW_RESTORE);
-            SetForegroundWindow(hWnd);
+            ToggleMainWindow(hWnd);
         }
         break;
     }
 
     case WM_SIZE:
+        // 最小化（SIZE_MINIMIZED）交给系统处理：窗口照常缩到任务栏，不隐藏、不重排布局。
+        // “隐藏窗口”是另一条独立路径，只在关闭窗口选择“滚到后台去！”或托盘/菜单里触发（SW_HIDE，任务栏按钮消失）
         if (wParam == SIZE_MINIMIZED) {
-            ShowWindow(hWnd, SW_HIDE);
-            return 0;
+            break;
         }
         if (g_pAdvManager) {
             RECT rc;
