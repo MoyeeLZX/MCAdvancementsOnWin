@@ -46,6 +46,7 @@ struct NotificationData {
     Gdiplus::Bitmap* pBitmap;
     Gdiplus::Bitmap* pIconBitmap;  // Base64解码后的成就图标
     std::wstring* pFontPath;  // 字体文件路径（可选）
+    HBITMAP hDib = NULL;      // 合成好的 32 位带 Alpha 位图，交给 UpdateLayeredWindow 使用
 };
 
 // 设置管理器

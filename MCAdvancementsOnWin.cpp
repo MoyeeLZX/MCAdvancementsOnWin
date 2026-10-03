@@ -974,6 +974,170 @@ void AdvancementManager::TriggerAdvancement(const std::wstring& id) {
     }
 }
 
+// ===== 成就通知：带 per-pixel alpha 的合成 =====
+// 以前用 SetLayeredWindowAttributes(LWA_ALPHA)：整窗统一 90% 不透明，
+// adv_back.png 四个角的透明像素也被一起涂成不透明，圆角等于白做。
+// 改成自己合成一张 32 位 ARGB 位图再用 UpdateLayeredWindow 贴上去后，
+// 每个像素保留自己的 Alpha，角上 alpha=0 的地方就真的透明了。
+
+// GDI 的 CreateFont 传的是"字符单元格高度"，GDI+ 的 Font 传的是 em 高度，
+// 二者差一个 (ascent+descent)/em，不换算的话换成 GDI+ 后字会明显变大
+static Gdiplus::REAL EmSizeFromCellHeight(const Gdiplus::FontFamily& family, int style, int cellHeight) {
+    UINT16 em = family.GetEmHeight(style);
+    UINT16 ascent = family.GetCellAscent(style);
+    UINT16 descent = family.GetCellDescent(style);
+    if (em == 0 || ascent + descent == 0) return (Gdiplus::REAL)cellHeight;
+    return (Gdiplus::REAL)cellHeight * (Gdiplus::REAL)em / (Gdiplus::REAL)(ascent + descent);
+}
+
+static HBITMAP ComposeNotification(NotificationData* pData, int width, int height, int dpi) {
+    if (!pData || width <= 0 || height <= 0) return NULL;
+
+    BITMAPINFO bi;
+    ZeroMemory(&bi, sizeof(bi));
+    bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bi.bmiHeader.biWidth = width;
+    bi.bmiHeader.biHeight = -height;      // 负值=自上而下，与 GDI+ 的行序一致
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+
+    void* pBits = NULL;
+    HBITMAP hDib = CreateDIBSection(NULL, &bi, DIB_RGB_COLORS, &pBits, NULL, 0);
+    if (!hDib || !pBits) {
+        if (hDib) DeleteObject(hDib);
+        return NULL;
+    }
+    memset(pBits, 0, (size_t)width * height * 4);   // 起始：全透明
+
+    // PARGB：告诉 GDI+ 这块内存按"预乘 Alpha"存放，正是 UpdateLayeredWindow 要求的格式
+    Gdiplus::Bitmap surface(width, height, width * 4, PixelFormat32bppPARGB, (BYTE*)pBits);
+    Gdiplus::Graphics g(&surface);
+
+    // 底图（四个角的透明度来自 PNG 本身）
+    if (pData->pBitmap && pData->pBitmap->GetLastStatus() == Gdiplus::Ok) {
+        g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
+        g.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
+        g.DrawImage(pData->pBitmap, 0, 0, width, height);
+    }
+    else {
+        Gdiplus::SolidBrush brush(Gdiplus::Color(255, 0, 100, 0));
+        g.FillRectangle(&brush, 0, 0, width, height);
+        Gdiplus::Pen pen(Gdiplus::Color(255, 255, 215, 0), 2.0f);
+        g.DrawRectangle(&pen, 1, 1, width - 2, height - 2);
+    }
+
+    if (!pData->pAdv) return hDib;
+
+    // 图标
+    int iconAreaWidth = 0;
+    int iconPadding = width / 24;
+    if (pData->pIconBitmap && pData->pIconBitmap->GetLastStatus() == Gdiplus::Ok) {
+        int iconSize = height * 50 / 100;
+        iconAreaWidth = iconSize + iconPadding;
+        int iconX = iconPadding;
+        int iconY = (height - iconSize) / 2;
+
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQuality);
+        g.DrawImage(pData->pIconBitmap, iconX, iconY, iconSize, iconSize);
+    }
+
+    // 字体：优先 bin\mc_fonts.ttf。GDI+ 私有字体集即可，不再需要 AddFontResourceEx
+    Gdiplus::FontFamily defaultFamily(L"微软雅黑");
+    Gdiplus::PrivateFontCollection fontCollection;
+    Gdiplus::FontFamily customFamily;
+    Gdiplus::FontFamily* pFamily = &defaultFamily;
+
+    if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
+        if (fontCollection.AddFontFile(pData->pFontPath->c_str()) == Gdiplus::Ok) {
+            int numFound = 0;
+            fontCollection.GetFamilies(1, &customFamily, &numFound);
+            if (numFound > 0) {
+                pFamily = &customFamily;
+                WCHAR familyName[LF_FACESIZE] = { 0 };
+                customFamily.GetFamilyName(familyName, LANG_NEUTRAL);
+                wchar_t debugMsg[512];
+                swprintf_s(debugMsg, L"使用自定义字体: %s\n", familyName);
+                OutputDebugString(debugMsg);
+            }
+        }
+        else {
+            OutputDebugString(L"加载字体文件失败\n");
+        }
+    }
+
+    const int fontStyle = Gdiplus::FontStyleBold;
+    Gdiplus::Font baseFont(pFamily, EmSizeFromCellHeight(*pFamily, fontStyle, height * 21 / 100), fontStyle, Gdiplus::UnitPixel);
+    Gdiplus::Font advFont(pFamily, EmSizeFromCellHeight(*pFamily, fontStyle, height * 40 / 100), fontStyle, Gdiplus::UnitPixel);
+
+    int textLeft = iconAreaWidth + iconPadding;
+    int padding = width / 24;
+
+    Gdiplus::StringFormat sf(Gdiplus::StringFormatFlagsNoWrap);
+    sf.SetAlignment(Gdiplus::StringAlignmentNear);
+    sf.SetLineAlignment(Gdiplus::StringAlignmentCenter);   // 对应原来的 DT_VCENTER
+
+    // 透明背景上不能用 ClearType（需要不透明底色），只能用灰度抗锯齿
+    g.SetTextRenderingHint(Gdiplus::TextRenderingHintAntiAliasGridFit);
+    Gdiplus::SolidBrush goldBrush(Gdiplus::Color(255, 255, 215, 0));
+
+    Gdiplus::RectF rcTitle((Gdiplus::REAL)textLeft, (Gdiplus::REAL)(height * 15 / 100),
+        (Gdiplus::REAL)(width - padding - textLeft), (Gdiplus::REAL)(height * 27 / 100));
+    g.DrawString(L"获得成就", -1, &baseFont, rcTitle, &sf, &goldBrush);
+
+    std::wstring displayTitle = pData->pAdv->title;
+    int charWidth = ScaleDpi(13, dpi);
+    int maxTitleLength = (width - textLeft) / (charWidth > 0 ? charWidth : 13);
+    if (maxTitleLength < 5) maxTitleLength = 5;
+    if (displayTitle.length() > (size_t)maxTitleLength) {
+        displayTitle = displayTitle.substr(0, maxTitleLength) + L"...";
+    }
+
+    Gdiplus::RectF rcAdv((Gdiplus::REAL)textLeft, (Gdiplus::REAL)(height * 40 / 100),
+        (Gdiplus::REAL)(width - padding - textLeft), (Gdiplus::REAL)(height * 50 / 100));
+    g.DrawString(displayTitle.c_str(), -1, &advFont, rcAdv, &sf, &goldBrush);       //成就名称
+
+    return hDib;
+}
+
+// 把合成好的位图贴到分层窗口上（位置与尺寸都是物理像素）
+static void UpdateNotificationLayer(HWND hWnd) {
+    NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
+    if (!pData || !pData->hDib) return;
+
+    RECT rc;
+    GetWindowRect(hWnd, &rc);
+
+    BITMAP bm;
+    ZeroMemory(&bm, sizeof(bm));
+    GetObject(pData->hDib, sizeof(bm), &bm);
+
+    POINT ptSrc = { 0, 0 };
+    POINT ptDst = { rc.left, rc.top };
+    SIZE sizeWnd = { bm.bmWidth, bm.bmHeight };
+
+    BLENDFUNCTION bf;
+    ZeroMemory(&bf, sizeof(bf));
+    bf.BlendOp = AC_SRC_OVER;
+    bf.SourceConstantAlpha = 230;    // 原 LWA_ALPHA 那档整窗淡化，现在只负责整体透明度
+    bf.AlphaFormat = AC_SRC_ALPHA;   // 每个像素用自己的 Alpha
+
+    HDC hdcScreen = GetDC(NULL);
+    HDC hdcMem = CreateCompatibleDC(hdcScreen);
+    HBITMAP hOld = (HBITMAP)SelectObject(hdcMem, pData->hDib);
+
+    if (!UpdateLayeredWindow(hWnd, hdcScreen, &ptDst, &sizeWnd, hdcMem, &ptSrc, 0, &bf, ULW_ALPHA)) {
+        wchar_t debugMsg[256];
+        swprintf_s(debugMsg, L"[通知] UpdateLayeredWindow 失败, GetLastError=%lu\n", GetLastError());
+        OutputDebugString(debugMsg);
+    }
+
+    SelectObject(hdcMem, hOld);
+    DeleteDC(hdcMem);
+    ReleaseDC(NULL, hdcScreen);
+}
+
 void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
     WNDCLASSEX wc = {};
     wc.cbSize = sizeof(WNDCLASSEX);
@@ -1048,8 +1212,6 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
 
     OutputDebugString(L"通知窗口创建成功\n");
 
-    SetLayeredWindowAttributes(hNotifWnd, 0, 230, LWA_ALPHA);
-
     NotificationData* pData = new NotificationData();
     pData->pAdv = new Advancement(adv);
 
@@ -1076,10 +1238,11 @@ void AdvancementManager::ShowAdvancementNotification(const Advancement& adv) {
 
     SetWindowLongPtr(hNotifWnd, GWLP_USERDATA, (LONG_PTR)pData);
 
-    ShowWindow(hNotifWnd, SW_SHOWNOACTIVATE);
-    UpdateWindow(hNotifWnd);
+    // 合成一次带 Alpha 的内容并贴到分层窗口上。之后滑入/滑出只移动窗口，位图不需要重画
+    pData->hDib = ComposeNotification(pData, windowWidth, windowHeight, nm.dpi);
+    UpdateNotificationLayer(hNotifWnd);
 
-    SetLayeredWindowAttributes(hNotifWnd, 0, 230, LWA_ALPHA);
+    ShowWindow(hNotifWnd, SW_SHOWNOACTIVATE);
 
     SetTimer(hNotifWnd, TIMER_NOTIFICATION_AUTO_CLOSE, 5000, NULL);
 
@@ -1636,25 +1799,10 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         }
 
         NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-        if (pData) {
-            if (pData->pAdv) {
-                wchar_t debugMsg[512];
-                swprintf_s(debugMsg, L"WM_CREATE: 成就标题=%s\n", pData->pAdv->title.c_str());
-                OutputDebugString(debugMsg);
-            }
-
-            if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
-                int result = AddFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
-                if (result > 0) {
-                    OutputDebugString(L"自定义字体加载成功\n");
-                    wchar_t debugMsg[256];
-                    swprintf_s(debugMsg, L"字体文件: %s, 加载数量: %d\n", pData->pFontPath->c_str(), result);
-                    OutputDebugString(debugMsg);
-                    SetWindowLongPtr(hWnd, GWLP_USERDATA + 2, 1);
-                } else {
-                    OutputDebugString(L"自定义字体加载失败，使用默认字体\n");
-                }
-            }
+        if (pData && pData->pAdv) {
+            wchar_t debugMsg[512];
+            swprintf_s(debugMsg, L"WM_CREATE: 成就标题=%s\n", pData->pAdv->title.c_str());
+            OutputDebugString(debugMsg);
         }
 
         NotifyMetrics nm = CalcNotifyMetrics();
@@ -1720,16 +1868,15 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
 
                 NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
                 if (pData) {
-                    if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
-                        RemoveFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
-                        OutputDebugString(L"自定义字体已卸载\n");
-                    }
-
                     if (pData->pIconBitmap) {
                         delete pData->pIconBitmap;
                     }
                     if (pData->pBitmap) {
                         delete pData->pBitmap;
+                    }
+                    if (pData->hDib) {
+                        DeleteObject(pData->hDib);
+                        pData->hDib = NULL;
                     }
                     if (pData->pAdv) {
                         delete pData->pAdv;
@@ -1754,140 +1901,26 @@ LRESULT CALLBACK NotificationWndProc(HWND hWnd, UINT message, WPARAM wParam, LPA
         break;
 
     case WM_PAINT: {
-        OutputDebugString(L"NotificationWndProc WM_PAINT called\n");
+        // 内容一律由 UpdateLayeredWindow 提供。这里不能再自绘，
+        // 否则不透明的自绘会把 adv_back.png 四个角的透明像素覆盖掉
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint(hWnd, &ps);
-
-        RECT rc;
-        GetWindowRect(hWnd, &rc);
-        int windowWidth = rc.right - rc.left;
-        int windowHeight = rc.bottom - rc.top;
-
-        HDC hdcMem = CreateCompatibleDC(hdc);
-        HBITMAP hbmMem = CreateCompatibleBitmap(hdc, windowWidth, windowHeight);
-        HBITMAP hbmOld = (HBITMAP)SelectObject(hdcMem, hbmMem);
-
-        NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
-        if (pData && pData->pBitmap && pData->pBitmap->GetLastStatus() == Gdiplus::Ok) {
-            Gdiplus::Graphics graphics(hdcMem);
-            graphics.SetSmoothingMode(Gdiplus::SmoothingModeNone);
-            graphics.SetInterpolationMode(Gdiplus::InterpolationModeNearestNeighbor);
-            graphics.SetPixelOffsetMode(Gdiplus::PixelOffsetModeNone);
-            graphics.DrawImage(pData->pBitmap, 0, 0, windowWidth, windowHeight);
-        }
-        else {
-            HBRUSH hBrush = CreateSolidBrush(RGB(0, 100, 0));
-            RECT rcFill = { 0, 0, windowWidth, windowHeight };
-            FillRect(hdcMem, &rcFill, hBrush);
-            DeleteObject(hBrush);
-
-            HPEN hPen = CreatePen(PS_SOLID, 2, RGB(255, 215, 0));
-            HPEN hOldPen = (HPEN)SelectObject(hdcMem, hPen);
-            HBRUSH hOldBrush = (HBRUSH)SelectObject(hdcMem, GetStockObject(NULL_BRUSH));
-            Rectangle(hdcMem, 1, 1, windowWidth - 1, windowHeight - 1);
-            SelectObject(hdcMem, hOldPen);
-            SelectObject(hdcMem, hOldBrush);
-            DeleteObject(hPen);
-        }
-
-        if (pData && pData->pAdv) {
-            SetBkMode(hdcMem, TRANSPARENT);
-
-            Gdiplus::PrivateFontCollection privateFontCollection;
-            std::wstring actualFontName = L"微软雅黑";
-
-            if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
-                Gdiplus::Status status = privateFontCollection.AddFontFile(pData->pFontPath->c_str());
-                if (status == Gdiplus::Ok) {
-                    int numFound = 0;
-                    Gdiplus::FontFamily fontFamily;
-                    privateFontCollection.GetFamilies(1, &fontFamily, &numFound);
-                    if (numFound > 0) {
-                        WCHAR familyName[256] = {0};
-                        fontFamily.GetFamilyName(familyName, LANG_NEUTRAL);
-                        actualFontName = familyName;
-                        wchar_t debugMsg[512];
-                        swprintf_s(debugMsg, L"使用自定义字体: %s\n", actualFontName.c_str());
-                        OutputDebugString(debugMsg);
-                    }
-                } else {
-                    OutputDebugString(L"加载字体文件失败\n");
-                }
-            }
-
-            int iconAreaWidth = 0;
-            int iconPadding = windowWidth / 24;
-
-            if (pData->pIconBitmap && pData->pIconBitmap->GetLastStatus() == Gdiplus::Ok) {
-                int iconSize = windowHeight * 50 / 100;
-                iconAreaWidth = iconSize + iconPadding;
-
-                int iconX = iconPadding;
-                int iconY = (windowHeight - iconSize) / 2;
-
-                Gdiplus::Graphics iconGraphics(hdcMem);
-                iconGraphics.SetInterpolationMode(Gdiplus::InterpolationModeHighQuality);
-                iconGraphics.DrawImage(pData->pIconBitmap, iconX, iconY, iconSize, iconSize);
-            }
-
-            int textLeft = iconAreaWidth + iconPadding;
-            int padding = windowWidth / 24;
-
-            int baseFontSize = windowHeight * 21 / 100;
-            HFONT hBaseFont = CreateFont(baseFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, actualFontName.c_str());
-
-            int advFontSize = windowHeight * 40 / 100;
-            HFONT hAdvFont = CreateFont(advFontSize, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                DEFAULT_QUALITY, DEFAULT_PITCH | FF_DONTCARE, actualFontName.c_str());
-
-            RECT rcTitle = { textLeft, windowHeight * 8 / 100, windowWidth - padding, windowHeight * 35 / 100 };
-            SetTextColor(hdcMem, RGB(255, 215, 0));
-            HFONT hOldFont = (HFONT)SelectObject(hdcMem, hBaseFont);
-            DrawText(hdcMem, L"获得成就", -1, &rcTitle, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-            RECT rcAdv = { textLeft, windowHeight * 40 / 100, windowWidth - padding, windowHeight * 90 / 100 };
-            std::wstring displayTitle = pData->pAdv->title;
-            // 13 是 96 DPI 下的单字宽度估算，必须随 DPI 一起放大，否则高 DPI 下会截断过度
-            int charWidth = ScaleDpi(13, GetDpiForWindowSafe(hWnd));
-            int maxTitleLength = (windowWidth - textLeft) / (charWidth > 0 ? charWidth : 13);
-            if (maxTitleLength < 5) maxTitleLength = 5;
-            if (displayTitle.length() > maxTitleLength) {
-                displayTitle = displayTitle.substr(0, maxTitleLength) + L"...";
-            }
-            SelectObject(hdcMem, hAdvFont);
-            DrawText(hdcMem, displayTitle.c_str(), -1, &rcAdv, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-
-            SelectObject(hdcMem, hOldFont);
-            DeleteObject(hBaseFont);
-            DeleteObject(hAdvFont);
-        }
-
-        BitBlt(hdc, 0, 0, windowWidth, windowHeight, hdcMem, 0, 0, SRCCOPY);
-
-        SelectObject(hdcMem, hbmOld);
-        DeleteObject(hbmMem);
-        DeleteDC(hdcMem);
-
+        BeginPaint(hWnd, &ps);
         EndPaint(hWnd, &ps);
-        break;
+        return 0;
     }
 
     case WM_DESTROY: {
         NotificationData* pData = (NotificationData*)GetWindowLongPtr(hWnd, GWLP_USERDATA);
         if (pData) {
-            if (pData->pFontPath && GetFileAttributes(pData->pFontPath->c_str()) != INVALID_FILE_ATTRIBUTES) {
-                RemoveFontResourceEx(pData->pFontPath->c_str(), FR_PRIVATE, 0);
-                OutputDebugString(L"WM_DESTROY: 自定义字体已卸载\n");
-            }
-
             if (pData->pIconBitmap) {
                 delete pData->pIconBitmap;
             }
             if (pData->pBitmap) {
                 delete pData->pBitmap;
+            }
+            if (pData->hDib) {
+                DeleteObject(pData->hDib);
+                pData->hDib = NULL;
             }
             if (pData->pAdv) {
                 delete pData->pAdv;
