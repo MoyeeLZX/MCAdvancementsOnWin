@@ -1,3 +1,5 @@
+🌏 **语言/Languages** ==> **简体中文** | [English](./README-EN.md)
+
 # 介绍
 ## 适用场景
 + 一个正常运转的**Windows10及更新的系统**。
