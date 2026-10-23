@@ -6,6 +6,9 @@
 
 ![A GIF that may add here in future...](https://github.com/404)
 
+## 即将到来。。，可能
+即将加入的功能会在这个文件内列出 --> [./Maybe-Todo.md](https://github.com/MoyeeLZX/MCAdvancementsOnWin/blob/main/Maybe-Todo.md) <--
+
 # Others
 + 原网址：https://www.2btb.top/zh/programs/MC_Adv_On_Win ；
 + **用了点AI** ；
